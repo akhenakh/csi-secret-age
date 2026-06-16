@@ -12,6 +12,7 @@ type Config struct {
 	VaultNamespace  string `env:"VAULT_NAMESPACE" envDefault:"kube-system"`
 	SocketPath      string `env:"SOCKET_PATH" envDefault:"/tmp/age-vault.sock"`
 	HTTPPort        int    `env:"HTTP_PORT" envDefault:"8090"`
+	DevMode         bool   `env:"DEV_MODE" envDefault:"false"`
 }
 
 // MasterKeyProvider defines an interface for fetching the master age key

@@ -38,6 +38,15 @@ Single-binary Go CSI provider for Kubernetes. All code lives in one package (`ma
 - `getTestLogger()` discards logs to keep test output clean.
 - Table-driven tests with `testify/assert` and `require`.
 
+## Local Development
+
+- Set `DEV_MODE=true` to run the binary outside a Kubernetes cluster.
+- In dev mode it uses `fake.NewSimpleClientset()` for K8s storage and auto-generates a throwaway `age` master key if `MASTER_KEY` is not set, so the vault starts unlocked and the Web UI is immediately usable.
+- Example:
+  ```bash
+  GOEXPERIMENT=runtimesecret DEV_MODE=true ./csi-secret-age
+  ```
+
 ## Repo Hygiene
 
 - `key.txt` is a local age secret key used in development. It should never be committed.

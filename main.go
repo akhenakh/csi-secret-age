@@ -11,10 +11,12 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"filippo.io/age"
 	"github.com/caarlos0/env/v11"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/rest"
 	"runtime/secret"
 	"sigs.k8s.io/secrets-store-csi-driver/provider/v1alpha1"
@@ -35,19 +37,37 @@ func main() {
 		logger.Warn("runtime/secret experiment is NOT enabled. Plaintext secrets may linger in heap memory.")
 	}
 
-	k8sConfig, err := rest.InClusterConfig()
-	if err != nil {
-		logger.Error("Failed to get in-cluster config", "error", err)
-		os.Exit(1)
-	}
-	k8sClient, err := kubernetes.NewForConfig(k8sConfig)
-	if err != nil {
-		logger.Error("Failed to create k8s client", "error", err)
-		os.Exit(1)
+	var k8sClient kubernetes.Interface
+	if cfg.DevMode {
+		logger.Warn("DEV MODE enabled: using fake Kubernetes client and auto-generated master key")
+		k8sClient = fake.NewSimpleClientset()
+	} else {
+		k8sConfig, err := rest.InClusterConfig()
+		if err != nil {
+			logger.Error("Failed to get in-cluster config", "error", err)
+			os.Exit(1)
+		}
+		var errClient error
+		k8sClient, errClient = kubernetes.NewForConfig(k8sConfig)
+		if errClient != nil {
+			logger.Error("Failed to create k8s client", "error", errClient)
+			os.Exit(1)
+		}
 	}
 
-	// You can easily swap this out with an AWSKMSProvider or GCPKMSProvider implementation in the future.
-	keyProvider := &EnvKeyProvider{Key: cfg.MasterKey}
+	// Auto-generate a throwaway key in dev mode so the vault is immediately usable
+	masterKey := cfg.MasterKey
+	if cfg.DevMode && masterKey == "" {
+		identity, err := age.GenerateX25519Identity()
+		if err != nil {
+			logger.Error("Failed to generate dev mode master key", "error", err)
+			os.Exit(1)
+		}
+		masterKey = identity.String()
+		logger.Info("Dev mode auto-generated master key", "key", masterKey)
+	}
+
+	keyProvider := &EnvKeyProvider{Key: masterKey}
 	manager := NewVaultManager(cfg, k8sClient, keyProvider)
 
 	if manager.IsLocked() {
