@@ -28,9 +28,16 @@ func (s *ProviderServer) Mount(ctx context.Context, req *v1alpha1.MountRequest) 
 		return nil, fmt.Errorf("failed to unmarshal attributes: %w", err)
 	}
 
-	podNamespace := attrs["csi.storage.k8s.io/pod.namespace"]
-	podSA := attrs["csi.storage.k8s.io/serviceAccount.name"]
+	podNamespace := strings.TrimSpace(attrs["csi.storage.k8s.io/pod.namespace"])
+	podSA := strings.TrimSpace(attrs["csi.storage.k8s.io/serviceAccount.name"])
 	requestedSecretsStr := attrs["secrets"]
+
+	if podNamespace == "" || podSA == "" {
+		return nil, fmt.Errorf("pod namespace and service account are required")
+	}
+	if strings.ContainsAny(podNamespace, "/\\\x00") || strings.ContainsAny(podSA, "/\\\x00") {
+		return nil, fmt.Errorf("invalid pod identity: namespace or service account contains forbidden characters")
+	}
 
 	s.logger.Info("Mount request", "podNS", podNamespace, "podSA", podSA)
 
@@ -59,6 +66,11 @@ func (s *ProviderServer) Mount(ctx context.Context, req *v1alpha1.MountRequest) 
 			}
 			fileName := strings.TrimSpace(parts[0])
 			vaultPath := strings.TrimSpace(parts[1])
+
+			if strings.Contains(fileName, "/") || strings.Contains(fileName, "\\") || fileName == ".." || strings.HasPrefix(fileName, ".") {
+				mountErr = fmt.Errorf("invalid file name %q", fileName)
+				return
+			}
 
 			node, exists := tree.Nodes[vaultPath]
 			if !exists {

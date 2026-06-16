@@ -196,10 +196,8 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
-  - apiGroups: [""]
-    resources: ["nodes", "pods"]
-    verbs: ["get", "list", "watch"]
+    resourceNames: ["age-vault-backend"]
+    verbs: ["get", "create", "update"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

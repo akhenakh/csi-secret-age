@@ -190,6 +190,48 @@ When these are set, every request to the Web UI must include a valid `Authorizat
 
 ---
 
+## Securing the Admin UI
+
+The built-in HTTP admin UI is designed for simplicity and does not implement TLS termination, CSRF protection, or security headers itself. In production, you are responsible for securing access to the admin port (`8090`). The recommended approach is to place a reverse proxy, ingress controller, or API gateway in front of the UI.
+
+### Recommended setup
+
+Do **not** expose the admin port directly on the node network. Instead:
+
+1. **Remove the Service from `deploy.yaml`** (the DaemonSet uses `hostNetwork: true`, so no Service is needed for internal CSI gRPC).
+2. **Port-forward for local access** with `kubectl port-forward -n kube-system ds/age-vault-csi 8090:8090` and access via `https://localhost:8090`.
+3. **Or, place a reverse proxy in front** if remote browser access is required:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: age-vault-admin
+  namespace: kube-system
+spec:
+  selector:
+    app: age-vault-csi
+  ports:
+    - port: 443
+      targetPort: 8090
+```
+
+Then use an ingress or gateway (e.g., NGINX Ingress, Istio, Ambassador, Traefik) that provides:
+
+| Concern | Gateway Responsibility |
+|---------|----------------------|
+| **TLS termination** | Terminate HTTPS at the gateway. Never expose the admin UI over plaintext HTTP on the node network. |
+| **CSRF protection** | Validate `Origin`/`Referer` headers, inject CSRF tokens, or require a custom header (e.g., `X-Requested-With`). |
+| **Security headers** | Inject `Strict-Transport-Security`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Content-Security-Policy`, and `Referrer-Policy`. |
+| **Rate limiting** | Apply request rate limits on `/unlock` to prevent brute-force attempts. |
+| **Authentication** | Optionally add an additional authentication layer (OAuth2, OIDC) before traffic reaches the UI's JWT middleware. |
+
+### Authentication
+
+When `PERM_CONFIG_PATH` and `JWT_PUBLIC_KEY` are configured, the UI's built-in JWT middleware enforces access control. When they are **not** set, the UI is completely open — anyone with network access to port 8090 can read, write, and delete secrets, and can attempt to unlock the vault. Always configure JWT authentication in production, even behind a reverse proxy.
+
+---
+
 ## Managing Secrets (Web UI)
 
 Once unlocked, the Web UI at http://localhost:8090 becomes your control plane.

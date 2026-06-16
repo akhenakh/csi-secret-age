@@ -10,6 +10,7 @@ import (
 	"runtime/secret"
 	"sort"
 	"strings"
+	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -585,10 +586,15 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
-		masterKey := r.FormValue("master_key")
-		if err := manager.Unlock(masterKey); err != nil {
-			logger.Warn("Failed unlock attempt", "error", err)
+		var unlockErr error
+		secret.Do(func() {
+			masterKey := r.FormValue("master_key")
+			unlockErr = manager.Unlock(masterKey)
+		})
+		if unlockErr != nil {
+			logger.Warn("Failed unlock attempt", "error", unlockErr)
 			state := UIState{Locked: true, Error: "Invalid Master Key provided."}
 			tmpl.Execute(w, state)
 			return
@@ -604,44 +610,48 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 			http.Error(w, "Method not allowed or Vault Locked", http.StatusMethodNotAllowed)
 			return
 		}
-
-		updatePath := strings.TrimSpace(r.FormValue("path"))
-		isFolder := r.FormValue("is_folder") == "true"
-		value := r.FormValue("value")
-
-		nsParts := strings.Split(r.FormValue("namespaces"), ",")
-		var namespaces []string
-		for _, ns := range nsParts {
-			if trimmed := strings.TrimSpace(ns); trimmed != "" {
-				namespaces = append(namespaces, trimmed)
-			}
-		}
-
-		saParts := strings.Split(r.FormValue("service_accounts"), ",")
-		var serviceAccounts []string
-		for _, sa := range saParts {
-			if trimmed := strings.TrimSpace(sa); trimmed != "" {
-				serviceAccounts = append(serviceAccounts, trimmed)
-			}
-		}
-
-		if updatePath == "" {
-			http.Error(w, "Path is required", http.StatusBadRequest)
-			return
-		}
-		if !isFolder && value == "" {
-			http.Error(w, "Value is required for secrets", http.StatusBadRequest)
-			return
-		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 		userPerms := getUserPerms(r)
-		if userPerms != nil && !userPerms.CanWrite(updatePath) {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
 
 		var updateErr error
+		var updatePath string
+		var isFolder bool
 		secret.Do(func() {
+			updatePath = strings.TrimSpace(r.FormValue("path"))
+			isFolder = r.FormValue("is_folder") == "true"
+			value := r.FormValue("value")
+
+			nsParts := strings.Split(r.FormValue("namespaces"), ",")
+			var namespaces []string
+			for _, ns := range nsParts {
+				if trimmed := strings.TrimSpace(ns); trimmed != "" {
+					namespaces = append(namespaces, trimmed)
+				}
+			}
+
+			saParts := strings.Split(r.FormValue("service_accounts"), ",")
+			var serviceAccounts []string
+			for _, sa := range saParts {
+				if trimmed := strings.TrimSpace(sa); trimmed != "" {
+					serviceAccounts = append(serviceAccounts, trimmed)
+				}
+			}
+
+			if updatePath == "" {
+				updateErr = fmt.Errorf("path is required")
+				return
+			}
+			if !isFolder && value == "" {
+				updateErr = fmt.Errorf("value is required for secrets")
+				return
+			}
+
+			if userPerms != nil && !userPerms.CanWrite(updatePath) {
+				updateErr = fmt.Errorf("forbidden")
+				return
+			}
+
 			updateErr = manager.UpdateVault(ctx, func(tree *VaultTree) error {
 				if tree.Nodes == nil {
 					tree.Nodes = make(map[string]*VaultNode)
@@ -676,6 +686,7 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 			http.Error(w, "Method not allowed or Vault Locked", http.StatusMethodNotAllowed)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 		deletePath := r.FormValue("path")
 		userPerms := getUserPerms(r)
@@ -733,7 +744,13 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 	})
 
 	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
-	server := &http.Server{Addr: addr, Handler: withAuth(mux, permMgr)}
+	server := &http.Server{
+		Addr:         addr,
+		Handler:      withAuth(mux, permMgr),
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
 	logger.Info("HTTP Admin UI listening", "address", addr)
 
 	go func() {

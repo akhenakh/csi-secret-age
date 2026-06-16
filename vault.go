@@ -28,14 +28,14 @@ type VaultNode struct {
 }
 
 func (n *VaultNode) CanAccess(namespace, sa string) bool {
-	nsMatch := len(n.AllowedNamespaces) == 0
+	nsMatch := false
 	for _, allowed := range n.AllowedNamespaces {
 		if allowed == namespace || allowed == "*" {
 			nsMatch = true
 			break
 		}
 	}
-	saMatch := len(n.AllowedServiceAccounts) == 0
+	saMatch := false
 	for _, allowed := range n.AllowedServiceAccounts {
 		if allowed == sa || allowed == "*" {
 			saMatch = true
@@ -136,42 +136,65 @@ func (m *VaultManager) LoadAndDecrypt(ctx context.Context) (*VaultTree, error) {
 		return &VaultTree{Nodes: make(map[string]*VaultNode)}, nil
 	}
 
-	reader, err := age.Decrypt(bytes.NewReader(ciphertext), identity)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt vault: %w", err)
-	}
+	var tree *VaultTree
+	var decryptErr error
+	secret.Do(func() {
+		reader, err := age.Decrypt(bytes.NewReader(ciphertext), identity)
+		if err != nil {
+			decryptErr = fmt.Errorf("failed to decrypt vault: %w", err)
+			return
+		}
 
-	plaintext, err := io.ReadAll(reader)
-	if err != nil {
-		return nil, err
-	}
+		plaintext, err := io.ReadAll(reader)
+		if err != nil {
+			decryptErr = err
+			return
+		}
 
-	var tree VaultTree
-	if err := json.Unmarshal(plaintext, &tree); err != nil {
-		return nil, err
+		var t VaultTree
+		if err := json.Unmarshal(plaintext, &t); err != nil {
+			decryptErr = err
+			return
+		}
+		tree = &t
+	})
+	if decryptErr != nil {
+		return nil, decryptErr
 	}
-	return &tree, nil
+	return tree, nil
 }
 
 func encryptTree(tree *VaultTree, identity *age.X25519Identity) ([]byte, error) {
-	plaintext, err := json.Marshal(tree)
-	if err != nil {
-		return nil, err
-	}
+	var result []byte
+	var encErr error
+	secret.Do(func() {
+		plaintext, err := json.Marshal(tree)
+		if err != nil {
+			encErr = err
+			return
+		}
 
-	var buf bytes.Buffer
-	recipient := identity.Recipient()
-	writer, err := age.Encrypt(&buf, recipient)
-	if err != nil {
-		return nil, err
+		var buf bytes.Buffer
+		recipient := identity.Recipient()
+		writer, err := age.Encrypt(&buf, recipient)
+		if err != nil {
+			encErr = err
+			return
+		}
+		if _, err := writer.Write(plaintext); err != nil {
+			encErr = err
+			return
+		}
+		if err := writer.Close(); err != nil {
+			encErr = err
+			return
+		}
+		result = buf.Bytes()
+	})
+	if encErr != nil {
+		return nil, encErr
 	}
-	if _, err := writer.Write(plaintext); err != nil {
-		return nil, err
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return result, nil
 }
 
 func (m *VaultManager) EncryptAndSave(ctx context.Context, tree *VaultTree) error {
