@@ -14,6 +14,42 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+type contextKey string
+
+const userPermsKey contextKey = "userPerms"
+
+func getUserPerms(r *http.Request) *UserPermissions {
+	if v := r.Context().Value(userPermsKey); v != nil {
+		if up, ok := v.(*UserPermissions); ok {
+			return up
+		}
+	}
+	return nil
+}
+
+func withAuth(handler http.Handler, permMgr *PermissionManager) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if permMgr == nil {
+			handler.ServeHTTP(w, r)
+			return
+		}
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		username, err := permMgr.ValidateJWT(token)
+		if err != nil {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		userPerms := permMgr.GetUserPermissions(username)
+		ctx := context.WithValue(r.Context(), userPermsKey, userPerms)
+		handler.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
 const adminHTML = `
 <!DOCTYPE html>
 <html>
@@ -324,7 +360,7 @@ func checkPathConflict(tree *VaultTree, newPath string, isFolder bool) string {
 	return ""
 }
 
-func buildTreeState(tree *VaultTree, currentPath string, entryPath string) UIState {
+func buildTreeState(tree *VaultTree, currentPath string, entryPath string, userPerms *UserPermissions) UIState {
 	currentPath = normalizePath(currentPath)
 	entryPath = normalizePath(entryPath)
 
@@ -336,11 +372,13 @@ func buildTreeState(tree *VaultTree, currentPath string, entryPath string) UISta
 	if state.IsEntryView {
 		state.EntryPath = entryPath
 		if node, ok := tree.Nodes[entryPath]; ok && !node.IsFolder {
-			state.Entry = UISecret{
-				Path:            entryPath,
-				Name:            path.Base(entryPath),
-				Namespaces:      strings.Join(node.AllowedNamespaces, ", "),
-				ServiceAccounts: strings.Join(node.AllowedServiceAccounts, ", "),
+			if userPerms == nil || userPerms.CanRead(entryPath) {
+				state.Entry = UISecret{
+					Path:            entryPath,
+					Name:            path.Base(entryPath),
+					Namespaces:      strings.Join(node.AllowedNamespaces, ", "),
+					ServiceAccounts: strings.Join(node.AllowedServiceAccounts, ", "),
+				}
 			}
 		}
 		state.ParentPath = path.Dir(entryPath)
@@ -397,10 +435,12 @@ func buildTreeState(tree *VaultTree, currentPath string, entryPath string) UISta
 
 	// Check if current path itself is a folder node
 	if node, ok := tree.Nodes[currentPath]; ok && node.IsFolder {
-		state.Folder = &UIFolderDetail{
-			Path:            currentPath,
-			Namespaces:      strings.Join(node.AllowedNamespaces, ", "),
-			ServiceAccounts: strings.Join(node.AllowedServiceAccounts, ", "),
+		if userPerms == nil || userPerms.CanRead(currentPath) {
+			state.Folder = &UIFolderDetail{
+				Path:            currentPath,
+				Namespaces:      strings.Join(node.AllowedNamespaces, ", "),
+				ServiceAccounts: strings.Join(node.AllowedServiceAccounts, ", "),
+			}
 		}
 	}
 
@@ -416,6 +456,9 @@ func buildTreeState(tree *VaultTree, currentPath string, entryPath string) UISta
 			continue // handled above
 		}
 		if !strings.HasPrefix(vaultPath, prefix) {
+			continue
+		}
+		if userPerms != nil && !userPerms.CanRead(vaultPath) {
 			continue
 		}
 		remaining := strings.TrimPrefix(vaultPath, prefix)
@@ -459,7 +502,7 @@ func buildTreeState(tree *VaultTree, currentPath string, entryPath string) UISta
 	return state
 }
 
-func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manager *VaultManager) error {
+func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manager *VaultManager, permMgr *PermissionManager) error {
 	tmpl := template.Must(template.New("admin").Parse(adminHTML))
 	mux := http.NewServeMux()
 
@@ -486,7 +529,8 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 				if currentPath == "" {
 					currentPath = "/"
 				}
-				state = buildTreeState(tree, currentPath, "")
+				userPerms := getUserPerms(r)
+				state = buildTreeState(tree, currentPath, "", userPerms)
 				state.Locked = false
 			})
 
@@ -518,7 +562,12 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 					return
 				}
 				entryPath := r.URL.Query().Get("path")
-				state = buildTreeState(tree, "", entryPath)
+				userPerms := getUserPerms(r)
+				if userPerms != nil && !userPerms.CanRead(entryPath) {
+					loadErr = fmt.Errorf("access denied to path %s", entryPath)
+					return
+				}
+				state = buildTreeState(tree, "", entryPath, userPerms)
 				state.Locked = false
 			})
 
@@ -585,6 +634,12 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 			return
 		}
 
+		userPerms := getUserPerms(r)
+		if userPerms != nil && !userPerms.CanWrite(updatePath) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
 		var updateErr error
 		secret.Do(func() {
 			tree, err := manager.LoadAndDecrypt(ctx)
@@ -629,6 +684,12 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 		}
 
 		deletePath := r.FormValue("path")
+		userPerms := getUserPerms(r)
+		if userPerms != nil && !userPerms.CanWrite(deletePath) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
 		var deleteErr error
 
 		secret.Do(func() {
@@ -664,6 +725,12 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 			return
 		}
 
+		userPerms := getUserPerms(r)
+		if userPerms != nil && !userPerms.CanExport() {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
 		sec, err := manager.k8sClient.CoreV1().Secrets(cfg.VaultNamespace).Get(ctx, cfg.VaultSecretName, metav1.GetOptions{})
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -675,7 +742,7 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 	})
 
 	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
-	server := &http.Server{Addr: addr, Handler: mux}
+	server := &http.Server{Addr: addr, Handler: withAuth(mux, permMgr)}
 	logger.Info("HTTP Admin UI listening", "address", addr)
 
 	go func() {

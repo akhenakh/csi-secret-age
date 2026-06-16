@@ -10,6 +10,7 @@ No external databases or heavy Vault installations are required.
 * **Zero Infrastructure:** State is saved as an encrypted blob inside a standard Kubernetes Secret. Backing up your cluster naturally backs up your secrets.
 * **Cold Start / Lock Mode:** The provider starts in a "Locked" state. It can be unlocked manually via the Web UI, via an environment variable, or seamlessly via Cloud KMS integrations.
 * **Granular Access Control:** Define exactly which Namespaces and ServiceAccounts can read specific paths in your secret tree.
+* **Web UI JWT Permissions:** In production (non-dev mode), the Web UI can enforce JWT-based RBAC so users only see and manage the parts of the tree they own.
 * **Modern Cryptography:** Powered by the modern, secure `filippo.io/age` encryption standard.
 * **Cloud KMS Ready:** Extensible `MasterKeyProvider` interface allows fetching the master unlock key from AWS KMS, GCP KMS, or Azure KeyVault.
 * **Memory Safe:** Built using Go 1.24+ `runtime/secret` experiment. All decryption, JSON parsing, and string manipulation happen inside a secure execution enclave. Plaintext secrets are strictly zeroed out from heap memory when no longer needed.
@@ -75,6 +76,74 @@ kubectl port-forward -n kube-system ds/age-vault-csi 8090:8090
 
 ---
 
+## Web UI User Permissions (Production)
+
+When running in a real cluster (i.e. **not** `DEV_MODE=true`), you can enforce JWT-based access control on the Web UI. This ensures users only see, create, update, or delete secrets within the branches they are allowed to access.
+
+### 1. Create a `perm.yaml` ConfigMap
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: age-vault-perms
+  namespace: kube-system
+data:
+  perm.yaml: |
+    userA:
+      - "/nats/*"
+      - "/postgresql/*"
+    userB:
+      - "/app/*"
+    admin:
+      - userH
+```
+
+Rules:
+- Each user gets a list of path patterns. Patterns support exact paths (`/db/postgres/password`) and prefix wildcards (`/nats/*`).
+- The `admin` list contains usernames that have full access to **all** secrets and can perform exports.
+- Only admins can click **Export Backup (.age)**.
+
+### 2. Provide the JWT public key
+
+The Web UI validates incoming `Authorization: Bearer <token>` headers using an RSA public key. Store it in a Secret:
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jwt-public-key
+  namespace: kube-system
+stringData:
+  JWT_PUBLIC_KEY: |
+    -----BEGIN PUBLIC KEY-----
+    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
+    -----END PUBLIC KEY-----
+```
+
+### 3. Wire the environment variables
+
+The DaemonSet in `deploy.yaml` already includes the volume mounts and env vars:
+
+```yaml
+env:
+  - name: PERM_CONFIG_PATH
+    value: /etc/age-vault/perm.yaml
+  - name: JWT_PUBLIC_KEY
+    valueFrom:
+      secretKeyRef:
+        name: jwt-public-key
+        key: JWT_PUBLIC_KEY
+  - name: JWT_USER_CLAIM
+    value: "sub"  # default; the JWT claim to use as the username
+```
+
+When these are set, every request to the Web UI must include a valid `Authorization: Bearer <jwt>` token. The UI will then only show folders and secrets the user is allowed to read.
+
+> **Tip:** In `DEV_MODE=true`, the permission system is **not** enforced. The Web UI remains open so you can develop and test without generating JWTs.
+
+---
+
 ## Managing Secrets (Web UI)
 
 Once unlocked, the Web UI at http://localhost:8090 becomes your control plane.
@@ -82,7 +151,7 @@ Once unlocked, the Web UI at http://localhost:8090 becomes your control plane.
 * **View ACLs:** See which namespaces and service accounts have access to which vault paths.
 * **Blind-Write Interface:** For security, secret values cannot be read back from the UI. They are displayed as `********`.
 * **Add/Update Secrets:** Use the form to insert new secrets or update existing ones. Example path: `/db/postgres/password`.
-* **Offline Backups:** Click **Export Backup (.age)** to download the entire vault securely. Because the export is `age`-encrypted, it is completely safe to store in version control, S3, or a local hard drive.
+* **Offline Backups:** Admins can click **Export Backup (.age)** to download the entire vault securely. Because the export is `age`-encrypted, it is completely safe to store in version control, S3, or a local hard drive.
 
 ---
 
@@ -134,14 +203,14 @@ spec:
 
 When the pod starts:
 1. If the vault is locked, the Pod will wait safely in `ContainerCreating`.
-2. Once unlocked, the CSI driver verifies that `production` and `db-client` are allowed to read `/db/postgres/password`. 
+2. Once unlocked, the CSI driver verifies that `production` and `db-client` are allowed to read `/db/postgres/password`.
 3. If successful, the plaintext secret is mounted as a file at `/mnt/secrets/db-pass`.
 
 ## Advanced Security: Hardware Memory Wiping
 
-This project takes advantage of the experimental `runtime/secret` package introduced in Go. 
+This project takes advantage of the experimental `runtime/secret` package introduced in Go.
 
-When compiled with `GOEXPERIMENT=runtimesecret` (see the `Dockerfile`):
+When compiled with `GOEXPERIMENT=runtimesecret` (see the `AGENTS.md`):
 1. **Secure Enclave Execution:** All JSON unmarshaling, `age` decryption, and string allocation for secrets happen inside a protected `secret.Do(func(){})` context.
 2. **Guaranteed Heap Wiping:** The Go Garbage Collector guarantees that the memory pages holding your plaintext secrets are **zeroed out** as soon as the gRPC mount response is sent.
 3. **Template Protection:** The Web UI HTML template renderer only ever receives stripped structs. The plaintext secrets never accidentally escape onto the heap where the HTTP server could leave them lingering in memory.

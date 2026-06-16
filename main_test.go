@@ -2,12 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"filippo.io/age"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -381,4 +389,130 @@ func TestCheckPathConflict(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMatchPermission(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+		path    string
+		want    bool
+	}{
+		{"exact match", "/nats/secret", "/nats/secret", true},
+		{"exact mismatch", "/nats/secret", "/nats/other", false},
+		{"wildcard prefix exact", "/nats/*", "/nats", true},
+		{"wildcard subpath", "/nats/*", "/nats/secret", true},
+		{"wildcard deep subpath", "/nats/*", "/nats/a/b/c", true},
+		{"wildcard mismatch", "/nats/*", "/natsx", false},
+		{"wildcard sibling", "/nats/*", "/postgres/secret", false},
+		{"root wildcard everything", "/*", "/anything", true},
+		{"root wildcard root", "/*", "/", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchPermission(tt.pattern, tt.path)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestPermissionManager_Load(t *testing.T) {
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	content := `
+userA:
+  - "/nats/*"
+  - "/postgresql/*"
+userB:
+  - "/app/*"
+admin:
+  - userH
+`
+	require.NoError(t, os.WriteFile(permPath, []byte(content), 0644))
+
+	pm, err := NewPermissionManager(permPath, "", "sub")
+	require.Error(t, err) // public key is required
+
+	// Generate a throwaway RSA key for the test
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	pm, err = NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	userA := pm.GetUserPermissions("userA")
+	require.NotNil(t, userA)
+	assert.False(t, userA.isAdmin)
+	assert.True(t, userA.CanRead("/nats/secret"))
+	assert.True(t, userA.CanRead("/postgresql/db"))
+	assert.False(t, userA.CanRead("/app/key"))
+
+	userB := pm.GetUserPermissions("userB")
+	require.NotNil(t, userB)
+	assert.True(t, userB.CanRead("/app/key"))
+
+	admin := pm.GetUserPermissions("userH")
+	require.NotNil(t, admin)
+	assert.True(t, admin.isAdmin)
+	assert.True(t, admin.CanRead("/anything"))
+	assert.True(t, admin.CanExport())
+	assert.True(t, admin.CanWrite("/anything"))
+
+	unknown := pm.GetUserPermissions("unknown")
+	require.NotNil(t, unknown)
+	assert.False(t, unknown.CanRead("/nats/secret"))
+}
+
+func TestPermissionManager_ValidateJWT(t *testing.T) {
+	// Generate RSA key pair
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin:\n  - userH\n"), 0644))
+
+	pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	// Valid token
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub": "userH",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	tokenString, err := token.SignedString(privateKey)
+	require.NoError(t, err)
+
+	username, err := pm.ValidateJWT(tokenString)
+	require.NoError(t, err)
+	assert.Equal(t, "userH", username)
+
+	// Invalid token (wrong key)
+	badPrivateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	badToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub": "userH",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	badTokenString, err := badToken.SignedString(badPrivateKey)
+	require.NoError(t, err)
+
+	_, err = pm.ValidateJWT(badTokenString)
+	require.Error(t, err)
+
+	// Missing claim
+	noSubToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	noSubTokenString, err := noSubToken.SignedString(privateKey)
+	require.NoError(t, err)
+
+	_, err = pm.ValidateJWT(noSubTokenString)
+	require.Error(t, err)
 }

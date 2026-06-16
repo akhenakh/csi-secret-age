@@ -8,6 +8,33 @@ stringData:
   MASTER_KEY: "AGE-SECRET-KEY-1..."
 ---
 apiVersion: v1
+kind: Secret
+metadata:
+  name: jwt-public-key
+  namespace: kube-system
+stringData:
+  # PEM-encoded RSA public key used to validate JWT tokens from the Web UI
+  JWT_PUBLIC_KEY: |
+    -----BEGIN PUBLIC KEY-----
+    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
+    -----END PUBLIC KEY-----
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: age-vault-perms
+  namespace: kube-system
+data:
+  perm.yaml: |
+    userA:
+      - "/nats/*"
+      - "/postgresql/*"
+    userB:
+      - "/app/*"
+    admin:
+      - userH
+---
+apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: age-vault-csi-sa
@@ -64,13 +91,25 @@ spec:
                 secretKeyRef:
                   name: age-master-key
                   key: MASTER_KEY
+            - name: JWT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: jwt-public-key
+                  key: JWT_PUBLIC_KEY
+            - name: PERM_CONFIG_PATH
+              value: /etc/age-vault/perm.yaml
             - name: SOCKET_PATH
               value: /csi/agevault.sock
           volumeMounts:
             - name: providers-socket-dir
               mountPath: /csi
+            - name: perms-config
+              mountPath: /etc/age-vault
       volumes:
         - name: providers-socket-dir
           hostPath:
             path: /var/lib/kubelet/plugins/secrets-store.csi.k8s.io/providers
             type: DirectoryOrCreate
+        - name: perms-config
+          configMap:
+            name: age-vault-perms

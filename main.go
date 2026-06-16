@@ -70,6 +70,17 @@ func main() {
 	keyProvider := &EnvKeyProvider{Key: masterKey}
 	manager := NewVaultManager(cfg, k8sClient, keyProvider)
 
+	var permMgr *PermissionManager
+	if cfg.PermConfigPath != "" {
+		var errPerm error
+		permMgr, errPerm = NewPermissionManager(cfg.PermConfigPath, cfg.JWTPublicKey, cfg.JWTUserClaim)
+		if errPerm != nil {
+			logger.Error("Failed to load permissions", "error", errPerm)
+			os.Exit(1)
+		}
+		logger.Info("Permissions loaded", "path", cfg.PermConfigPath, "user_claim", cfg.JWTUserClaim)
+	}
+
 	if manager.IsLocked() {
 		logger.Warn("Starting in LOCKED mode. Access the Web UI to unlock the vault.")
 	} else {
@@ -105,7 +116,7 @@ func main() {
 
 	// 2. HTTP Admin Server
 	g.Go(func() error {
-		return startHTTPServer(ctx, logger, cfg, manager)
+		return startHTTPServer(ctx, logger, cfg, manager, permMgr)
 	})
 
 	interrupt := make(chan os.Signal, 1)

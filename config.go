@@ -13,6 +13,10 @@ type Config struct {
 	SocketPath      string `env:"SOCKET_PATH" envDefault:"/tmp/age-vault.sock"`
 	HTTPPort        int    `env:"HTTP_PORT" envDefault:"8090"`
 	DevMode         bool   `env:"DEV_MODE" envDefault:"false"`
+
+	PermConfigPath string `env:"PERM_CONFIG_PATH"`
+	JWTPublicKey   string `env:"JWT_PUBLIC_KEY"`
+	JWTUserClaim   string `env:"JWT_USER_CLAIM" envDefault:"sub"`
 }
 
 // MasterKeyProvider defines an interface for fetching the master age key
