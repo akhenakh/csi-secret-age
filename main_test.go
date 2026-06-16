@@ -1,0 +1,300 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"testing"
+
+	"filippo.io/age"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
+	"sigs.k8s.io/secrets-store-csi-driver/provider/v1alpha1"
+)
+
+// Helper: Generate a throwaway age key for testing
+func generateTestMasterKey(t *testing.T) string {
+	identity, err := age.GenerateX25519Identity()
+	require.NoError(t, err)
+	return identity.String()
+}
+
+func getTestLogger() *slog.Logger {
+	// Discard logs during tests to keep output clean
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestVaultNode_CanAccess(t *testing.T) {
+	tests := []struct {
+		name          string
+		node          VaultNode
+		testNamespace string
+		testSA        string
+		want          bool
+	}{
+		{
+			name: "Wildcard allows everything",
+			node: VaultNode{
+				AllowedNamespaces:      []string{"*"},
+				AllowedServiceAccounts: []string{"*"},
+			},
+			testNamespace: "random-ns",
+			testSA:        "random-sa",
+			want:          true,
+		},
+		{
+			name: "Specific namespace and SA matches",
+			node: VaultNode{
+				AllowedNamespaces:      []string{"prod"},
+				AllowedServiceAccounts: []string{"db-client"},
+			},
+			testNamespace: "prod",
+			testSA:        "db-client",
+			want:          true,
+		},
+		{
+			name: "Namespace mismatch denies access",
+			node: VaultNode{
+				AllowedNamespaces:      []string{"prod"},
+				AllowedServiceAccounts: []string{"db-client"},
+			},
+			testNamespace: "staging",
+			testSA:        "db-client",
+			want:          false,
+		},
+		{
+			name: "ServiceAccount mismatch denies access",
+			node: VaultNode{
+				AllowedNamespaces:      []string{"prod"},
+				AllowedServiceAccounts: []string{"db-client"},
+			},
+			testNamespace: "prod",
+			testSA:        "web-client",
+			want:          false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.node.CanAccess(tt.testNamespace, tt.testSA)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestVaultManager_EncryptAndLoad(t *testing.T) {
+	ctx := context.Background()
+	fakeClient := fake.NewSimpleClientset()
+	cfg := Config{
+		MasterKey:       generateTestMasterKey(t),
+		VaultSecretName: "test-vault",
+		VaultNamespace:  "kube-system",
+	}
+
+	// Use the EnvKeyProvider to mock passing the key, which auto-unlocks the manager
+	keyProvider := &EnvKeyProvider{Key: cfg.MasterKey}
+	mgr := NewVaultManager(cfg, fakeClient, keyProvider)
+
+	// Verify the vault is unlocked
+	require.False(t, mgr.IsLocked(), "Vault should be unlocked via the keyProvider")
+
+	// 1. Loading an empty/non-existent vault should return an empty tree, not an error
+	emptyTree, err := mgr.LoadAndDecrypt(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, emptyTree)
+	require.Empty(t, emptyTree.Nodes)
+
+	// 2. Populate the tree and save it
+	tree := &VaultTree{
+		Nodes: map[string]*VaultNode{
+			"/test/secret": {
+				Value:                  "my-super-secret",
+				AllowedNamespaces:      []string{"*"},
+				AllowedServiceAccounts: []string{"*"},
+			},
+		},
+	}
+	err = mgr.EncryptAndSave(ctx, tree)
+	require.NoError(t, err)
+
+	// 3. Verify it was actually written to the fake K8s client
+	k8sSecret, err := fakeClient.CoreV1().Secrets(cfg.VaultNamespace).Get(ctx, cfg.VaultSecretName, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Contains(t, k8sSecret.Data, "vault.enc")
+	require.NotContains(t, string(k8sSecret.Data["vault.enc"]), "my-super-secret", "The K8s secret should be encrypted, plaintext must not be visible!")
+
+	// 4. Load it back and verify contents
+	loadedTree, err := mgr.LoadAndDecrypt(ctx)
+	require.NoError(t, err)
+	require.Contains(t, loadedTree.Nodes, "/test/secret")
+	assert.Equal(t, "my-super-secret", loadedTree.Nodes["/test/secret"].Value)
+}
+
+func TestProviderServer_Mount(t *testing.T) {
+	ctx := context.Background()
+	fakeClient := fake.NewSimpleClientset()
+	cfg := Config{
+		MasterKey:       generateTestMasterKey(t),
+		VaultSecretName: "test-vault",
+		VaultNamespace:  "kube-system",
+	}
+
+	keyProvider := &EnvKeyProvider{Key: cfg.MasterKey}
+	mgr := NewVaultManager(cfg, fakeClient, keyProvider)
+	require.False(t, mgr.IsLocked(), "Vault should be unlocked")
+
+	// Setup ProviderServer
+	server := &ProviderServer{
+		manager: mgr,
+		logger:  getTestLogger(),
+	}
+
+	// Setup Vault Data
+	tree := &VaultTree{
+		Nodes: map[string]*VaultNode{
+			"/db/pass": {
+				Value:                  "db-secret-value",
+				AllowedNamespaces:      []string{"prod"},
+				AllowedServiceAccounts: []string{"app"},
+			},
+			"/api/key": {
+				Value:                  "api-secret-value",
+				AllowedNamespaces:      []string{"*"},
+				AllowedServiceAccounts: []string{"*"},
+			},
+		},
+	}
+	require.NoError(t, mgr.EncryptAndSave(ctx, tree))
+
+	// Helper to generate a mount request
+	makeMountReq := func(ns, sa, secretsConfig string) *v1alpha1.MountRequest {
+		attrs := map[string]string{
+			"csi.storage.k8s.io/pod.namespace":       ns,
+			"csi.storage.k8s.io/serviceAccount.name": sa,
+			"secrets":                                secretsConfig,
+		}
+		attrBytes, _ := json.Marshal(attrs)
+		return &v1alpha1.MountRequest{Attributes: string(attrBytes)}
+	}
+
+	tests := []struct {
+		name          string
+		req           *v1alpha1.MountRequest
+		expectErr     bool
+		errContains   string
+		expectedFiles map[string]string
+	}{
+		{
+			name:      "Successful mount single secret",
+			req:       makeMountReq("prod", "app", "db-password=/db/pass"),
+			expectErr: false,
+			expectedFiles: map[string]string{
+				"db-password": "db-secret-value",
+			},
+		},
+		{
+			name:      "Successful mount multiple secrets with spaces",
+			req:       makeMountReq("prod", "app", " db-password = /db/pass , api-key = /api/key "),
+			expectErr: false,
+			expectedFiles: map[string]string{
+				"db-password": "db-secret-value",
+				"api-key":     "api-secret-value",
+			},
+		},
+		{
+			name:        "Access Denied due to wrong namespace",
+			req:         makeMountReq("staging", "app", "db-password=/db/pass"),
+			expectErr:   true,
+			errContains: "access denied to path /db/pass",
+		},
+		{
+			name:        "Access Denied due to wrong service account",
+			req:         makeMountReq("prod", "web", "db-password=/db/pass"),
+			expectErr:   true,
+			errContains: "access denied to path /db/pass",
+		},
+		{
+			name:        "Missing secret in vault",
+			req:         makeMountReq("prod", "app", "missing=/does/not/exist"),
+			expectErr:   true,
+			errContains: "not found in vault",
+		},
+		{
+			name: "Malformed attributes JSON",
+			req: &v1alpha1.MountRequest{
+				Attributes: "invalid-json",
+			},
+			expectErr:   true,
+			errContains: "failed to unmarshal attributes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := server.Mount(ctx, tt.req)
+
+			if tt.expectErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+				assert.Nil(t, resp)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, resp)
+				assert.Len(t, resp.Files, len(tt.expectedFiles))
+
+				// Verify mounted files match expected
+				filesMap := make(map[string]string)
+				for _, f := range resp.Files {
+					filesMap[f.Path] = string(f.Contents)
+				}
+				for expectedName, expectedVal := range tt.expectedFiles {
+					assert.Equal(t, expectedVal, filesMap[expectedName])
+				}
+			}
+		})
+	}
+}
+
+func TestProviderServer_Version(t *testing.T) {
+	server := &ProviderServer{logger: getTestLogger()}
+	resp, err := server.Version(context.Background(), &v1alpha1.VersionRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, "v1alpha1", resp.Version)
+	assert.Equal(t, "age-vault-provider", resp.RuntimeName)
+}
+
+func TestVaultManager_LockedState(t *testing.T) {
+	ctx := context.Background()
+	fakeClient := fake.NewSimpleClientset()
+	cfg := Config{
+		VaultSecretName: "test-vault",
+		VaultNamespace:  "kube-system",
+	}
+
+	// 1. Initialize without a key provider (simulating missing key)
+	mgr := NewVaultManager(cfg, fakeClient, nil)
+	require.True(t, mgr.IsLocked())
+
+	// 2. Trying to decrypt while locked should fail
+	_, err := mgr.LoadAndDecrypt(ctx)
+	require.ErrorIs(t, err, ErrVaultLocked)
+
+	// 3. Trying to encrypt while locked should fail
+	err = mgr.EncryptAndSave(ctx, &VaultTree{})
+	require.ErrorIs(t, err, ErrVaultLocked)
+
+	// 4. Unlock with a valid key
+	masterKey := generateTestMasterKey(t)
+	err = mgr.Unlock(masterKey)
+	require.NoError(t, err)
+	require.False(t, mgr.IsLocked())
+
+	// 5. Operations should now succeed
+	tree, err := mgr.LoadAndDecrypt(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, tree)
+}

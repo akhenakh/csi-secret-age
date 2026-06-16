@@ -1,0 +1,76 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: age-master-key
+  namespace: kube-system
+stringData:
+  # Generated using `age-keygen`
+  MASTER_KEY: "AGE-SECRET-KEY-1..."
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: age-vault-csi-sa
+  namespace: kube-system
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: age-vault-csi-role
+rules:
+  # Allows reading and updating the backed Kubernetes Secret containing the Vault
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: age-vault-csi-binding
+subjects:
+  - kind: ServiceAccount
+    name: age-vault-csi-sa
+    namespace: kube-system
+roleRef:
+  kind: ClusterRole
+  name: age-vault-csi-role
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: age-vault-csi
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: age-vault-csi
+  template:
+    metadata:
+      labels:
+        app: age-vault-csi
+    spec:
+      serviceAccountName: age-vault-csi-sa
+      hostNetwork: true
+      containers:
+        - name: csi-driver
+          image: age-vault-csi:latest
+          env:
+            - name: MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: age-master-key
+                  key: MASTER_KEY
+            - name: SOCKET_PATH
+              value: /csi/agevault.sock
+          volumeMounts:
+            - name: providers-socket-dir
+              mountPath: /csi
+      volumes:
+        - name: providers-socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/secrets-store.csi.k8s.io/providers
+            type: DirectoryOrCreate
