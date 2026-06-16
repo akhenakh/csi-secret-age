@@ -266,6 +266,9 @@ func (m *VaultManager) UpdateVault(ctx context.Context, modifier func(*VaultTree
 					ObjectMeta: metav1.ObjectMeta{Name: m.config.VaultSecretName},
 					Data:       map[string][]byte{"vault.enc": ciphertext},
 				}, metav1.CreateOptions{})
+				if err != nil && k8serrors.IsAlreadyExists(err) {
+					continue // another writer created it first; re-fetch and merge
+				}
 				return err
 			}
 			return err
