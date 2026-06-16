@@ -22,6 +22,7 @@ import (
 
 type VaultNode struct {
 	Value                  string   `json:"value"`
+	IsFolder               bool     `json:"isFolder"`
 	AllowedNamespaces      []string `json:"allowedNamespaces"`
 	AllowedServiceAccounts []string `json:"allowedServiceAccounts"`
 }

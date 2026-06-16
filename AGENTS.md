@@ -47,6 +47,14 @@ Single-binary Go CSI provider for Kubernetes. All code lives in one package (`ma
   GOEXPERIMENT=runtimesecret DEV_MODE=true ./csi-secret-age
   ```
 
+## Web UI
+
+- **Tree navigation:** The home page (`/`) shows a folder tree with breadcrumb navigation based on path segments (`/db/postgres/...`).
+- **Folder ACLs:** You can create folder nodes (with the "Create as folder" checkbox) that have ACLs but no secret value. When navigating into a folder, its ACLs are shown at the top.
+- **Entry detail:** Clicking a leaf entry opens `/entry?path=...` showing the masked value, ACLs, and a delete button.
+- **Blind-write:** Values are never displayed in plaintext; the UI always shows `********`.
+- **Path conflicts:** The UI validates that a path cannot be both a folder and a secret, and that leaf secrets cannot have children.
+
 ## Repo Hygiene
 
 - `key.txt` is a local age secret key used in development. It should never be committed.

@@ -298,3 +298,87 @@ func TestVaultManager_LockedState(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, tree)
 }
+
+func TestCheckPathConflict(t *testing.T) {
+	tests := []struct {
+		name      string
+		tree      *VaultTree
+		newPath   string
+		isFolder  bool
+		wantError string
+	}{
+		{
+			name: "no conflict empty tree",
+			tree: &VaultTree{Nodes: map[string]*VaultNode{}},
+			newPath: "/nats/secret", isFolder: false,
+			wantError: "",
+		},
+		{
+			name: "conflict leaf already exists",
+			tree: &VaultTree{Nodes: map[string]*VaultNode{
+				"/nats/secret": {Value: "x", IsFolder: false},
+			}},
+			newPath: "/nats/secret", isFolder: true,
+			wantError: "already exists as a secret",
+		},
+		{
+			name: "conflict folder already exists",
+			tree: &VaultTree{Nodes: map[string]*VaultNode{
+				"/nats/secret": {IsFolder: true},
+			}},
+			newPath: "/nats/secret", isFolder: false,
+			wantError: "already exists as a folder",
+		},
+		{
+			name: "conflict leaf cannot have children",
+			tree: &VaultTree{Nodes: map[string]*VaultNode{
+				"/nats/secret": {Value: "x", IsFolder: false},
+			}},
+			newPath: "/nats", isFolder: false,
+			wantError: "cannot have children",
+		},
+		{
+			name: "conflict cannot create under leaf",
+			tree: &VaultTree{Nodes: map[string]*VaultNode{
+				"/nats": {Value: "x", IsFolder: false},
+			}},
+			newPath: "/nats/secret", isFolder: false,
+			wantError: "under existing secret",
+		},
+		{
+			name: "conflict cannot create folder under leaf",
+			tree: &VaultTree{Nodes: map[string]*VaultNode{
+				"/nats": {Value: "x", IsFolder: false},
+			}},
+			newPath: "/nats/secret", isFolder: true,
+			wantError: "under existing secret",
+		},
+		{
+			name: "allowed folder can have children",
+			tree: &VaultTree{Nodes: map[string]*VaultNode{
+				"/nats/secret": {Value: "x", IsFolder: false},
+			}},
+			newPath: "/nats", isFolder: true,
+			wantError: "",
+		},
+		{
+			name: "allowed update same type",
+			tree: &VaultTree{Nodes: map[string]*VaultNode{
+				"/nats/secret": {Value: "x", IsFolder: false},
+			}},
+			newPath: "/nats/secret", isFolder: false,
+			wantError: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := checkPathConflict(tt.tree, tt.newPath, tt.isFolder)
+			if tt.wantError == "" {
+				assert.Empty(t, got)
+			} else {
+				assert.Contains(t, got, tt.wantError)
+			}
+		})
+	}
+}
