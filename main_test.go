@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,8 +21,12 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/secrets-store-csi-driver/provider/v1alpha1"
 )
 
@@ -604,4 +609,83 @@ func BenchmarkProviderServer_Mount(b *testing.B) {
 		_, err := server.Mount(ctx, req)
 		require.NoError(b, err)
 	}
+}
+
+func TestVaultManager_UpdateVault(t *testing.T) {
+	ctx := context.Background()
+	fakeClient := fake.NewSimpleClientset()
+	cfg := Config{
+		MasterKey:       generateTestMasterKey(t),
+		VaultSecretName: "test-vault",
+		VaultNamespace:  "kube-system",
+	}
+	keyProvider := &EnvKeyProvider{Key: cfg.MasterKey}
+	mgr := NewVaultManager(cfg, fakeClient, keyProvider)
+	require.False(t, mgr.IsLocked())
+
+	// Initial update should create the secret
+	err := mgr.UpdateVault(ctx, func(tree *VaultTree) error {
+		tree.Nodes["/db/pass"] = &VaultNode{
+			Value:                  "secret",
+			AllowedNamespaces:      []string{"*"},
+			AllowedServiceAccounts: []string{"*"},
+		}
+		return nil
+	})
+	require.NoError(t, err)
+
+	loaded, err := mgr.LoadAndDecrypt(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "secret", loaded.Nodes["/db/pass"].Value)
+
+	// Second update should modify
+	err = mgr.UpdateVault(ctx, func(tree *VaultTree) error {
+		tree.Nodes["/db/pass"].Value = "updated"
+		return nil
+	})
+	require.NoError(t, err)
+
+	loaded, err = mgr.LoadAndDecrypt(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "updated", loaded.Nodes["/db/pass"].Value)
+}
+
+func TestVaultManager_UpdateVault_Conflict(t *testing.T) {
+	ctx := context.Background()
+	fakeClient := fake.NewSimpleClientset()
+	cfg := Config{
+		MasterKey:       generateTestMasterKey(t),
+		VaultSecretName: "test-vault",
+		VaultNamespace:  "kube-system",
+	}
+	keyProvider := &EnvKeyProvider{Key: cfg.MasterKey}
+	mgr := NewVaultManager(cfg, fakeClient, keyProvider)
+	require.False(t, mgr.IsLocked())
+
+	// Prepopulate
+	tree := &VaultTree{Nodes: map[string]*VaultNode{
+		"/db/pass": {Value: "initial", AllowedNamespaces: []string{"*"}, AllowedServiceAccounts: []string{"*"}},
+	}}
+	require.NoError(t, mgr.EncryptAndSave(ctx, tree))
+
+	// Inject a conflict on the first update attempt
+	conflictCount := 0
+	fakeClient.PrependReactor("update", "secrets", func(action k8stesting.Action) (handled bool, ret runtime.Object, err error) {
+		if conflictCount == 0 {
+			conflictCount++
+			return true, nil, k8serrors.NewConflict(corev1.Resource("secrets"), cfg.VaultSecretName, errors.New("simulated conflict"))
+		}
+		return false, nil, nil
+	})
+
+	err := mgr.UpdateVault(ctx, func(tree *VaultTree) error {
+		tree.Nodes["/db/pass"].Value = "updated-after-conflict"
+		return nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, 1, conflictCount, "expected one conflict to be simulated")
+
+	loaded, err := mgr.LoadAndDecrypt(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "updated-after-conflict", loaded.Nodes["/db/pass"].Value)
 }

@@ -153,6 +153,27 @@ func (m *VaultManager) LoadAndDecrypt(ctx context.Context) (*VaultTree, error) {
 	return &tree, nil
 }
 
+func encryptTree(tree *VaultTree, identity *age.X25519Identity) ([]byte, error) {
+	plaintext, err := json.Marshal(tree)
+	if err != nil {
+		return nil, err
+	}
+
+	var buf bytes.Buffer
+	recipient := identity.Recipient()
+	writer, err := age.Encrypt(&buf, recipient)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := writer.Write(plaintext); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
 func (m *VaultManager) EncryptAndSave(ctx context.Context, tree *VaultTree) error {
 	m.mu.RLock()
 	locked := m.isLocked
@@ -163,22 +184,8 @@ func (m *VaultManager) EncryptAndSave(ctx context.Context, tree *VaultTree) erro
 		return ErrVaultLocked
 	}
 
-	plaintext, err := json.Marshal(tree)
+	ciphertext, err := encryptTree(tree, identity)
 	if err != nil {
-		return err
-	}
-
-	var buf bytes.Buffer
-	recipient := identity.Recipient()
-	writer, err := age.Encrypt(&buf, recipient)
-	if err != nil {
-		return err
-	}
-
-	if _, err := writer.Write(plaintext); err != nil {
-		return err
-	}
-	if err := writer.Close(); err != nil {
 		return err
 	}
 
@@ -188,7 +195,7 @@ func (m *VaultManager) EncryptAndSave(ctx context.Context, tree *VaultTree) erro
 		if k8serrors.IsNotFound(err) {
 			_, err = secretClient.Create(ctx, &corev1.Secret{
 				ObjectMeta: metav1.ObjectMeta{Name: m.config.VaultSecretName},
-				Data:       map[string][]byte{"vault.enc": buf.Bytes()},
+				Data:       map[string][]byte{"vault.enc": ciphertext},
 			}, metav1.CreateOptions{})
 			return err
 		}
@@ -198,7 +205,89 @@ func (m *VaultManager) EncryptAndSave(ctx context.Context, tree *VaultTree) erro
 	if sec.Data == nil {
 		sec.Data = make(map[string][]byte)
 	}
-	sec.Data["vault.enc"] = buf.Bytes()
+	sec.Data["vault.enc"] = ciphertext
 	_, err = secretClient.Update(ctx, sec, metav1.UpdateOptions{})
 	return err
+}
+
+// UpdateVault performs a read-modify-write cycle on the Kubernetes Secret
+// with optimistic locking. If the Secret is modified by another process
+// between the read and the write, the update is retried (up to 5 times).
+func (m *VaultManager) UpdateVault(ctx context.Context, modifier func(*VaultTree) error) error {
+	m.mu.RLock()
+	locked := m.isLocked
+	identity := m.identity
+	m.mu.RUnlock()
+
+	if locked || identity == nil {
+		return ErrVaultLocked
+	}
+
+	const maxRetries = 5
+	secretClient := m.k8sClient.CoreV1().Secrets(m.config.VaultNamespace)
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		sec, err := secretClient.Get(ctx, m.config.VaultSecretName, metav1.GetOptions{})
+		if err != nil {
+			if k8serrors.IsNotFound(err) {
+				// Secret doesn't exist yet; create it.
+				tree := &VaultTree{Nodes: make(map[string]*VaultNode)}
+				if err := modifier(tree); err != nil {
+					return err
+				}
+				ciphertext, err := encryptTree(tree, identity)
+				if err != nil {
+					return err
+				}
+				_, err = secretClient.Create(ctx, &corev1.Secret{
+					ObjectMeta: metav1.ObjectMeta{Name: m.config.VaultSecretName},
+					Data:       map[string][]byte{"vault.enc": ciphertext},
+				}, metav1.CreateOptions{})
+				return err
+			}
+			return err
+		}
+
+		var tree *VaultTree
+		if ciphertext, ok := sec.Data["vault.enc"]; ok && len(ciphertext) > 0 {
+			reader, err := age.Decrypt(bytes.NewReader(ciphertext), identity)
+			if err != nil {
+				return fmt.Errorf("failed to decrypt vault: %w", err)
+			}
+			plaintext, err := io.ReadAll(reader)
+			if err != nil {
+				return err
+			}
+			tree = &VaultTree{}
+			if err := json.Unmarshal(plaintext, tree); err != nil {
+				return err
+			}
+		} else {
+			tree = &VaultTree{Nodes: make(map[string]*VaultNode)}
+		}
+
+		if err := modifier(tree); err != nil {
+			return err
+		}
+
+		ciphertext, err := encryptTree(tree, identity)
+		if err != nil {
+			return err
+		}
+
+		sec.Data["vault.enc"] = ciphertext
+		_, err = secretClient.Update(ctx, sec, metav1.UpdateOptions{})
+		if err == nil {
+			return nil
+		}
+		if k8serrors.IsConflict(err) {
+			if attempt < maxRetries-1 {
+				time.Sleep(time.Duration(attempt+1) * 50 * time.Millisecond)
+				continue
+			}
+		}
+		return err
+	}
+
+	return fmt.Errorf("failed to update vault after %d attempts due to conflicts", maxRetries)
 }

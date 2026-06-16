@@ -642,29 +642,23 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 
 		var updateErr error
 		secret.Do(func() {
-			tree, err := manager.LoadAndDecrypt(ctx)
-			if err != nil {
-				updateErr = err
-				return
-			}
+			updateErr = manager.UpdateVault(ctx, func(tree *VaultTree) error {
+				if tree.Nodes == nil {
+					tree.Nodes = make(map[string]*VaultNode)
+				}
 
-			if tree.Nodes == nil {
-				tree.Nodes = make(map[string]*VaultNode)
-			}
+				if conflict := checkPathConflict(tree, updatePath, isFolder); conflict != "" {
+					return fmt.Errorf("conflict: %s", conflict)
+				}
 
-			if conflict := checkPathConflict(tree, updatePath, isFolder); conflict != "" {
-				updateErr = fmt.Errorf("conflict: %s", conflict)
-				return
-			}
-
-			tree.Nodes[updatePath] = &VaultNode{
-				Value:                  value,
-				IsFolder:               isFolder,
-				AllowedNamespaces:      namespaces,
-				AllowedServiceAccounts: serviceAccounts,
-			}
-
-			updateErr = manager.EncryptAndSave(ctx, tree)
+				tree.Nodes[updatePath] = &VaultNode{
+					Value:                  value,
+					IsFolder:               isFolder,
+					AllowedNamespaces:      namespaces,
+					AllowedServiceAccounts: serviceAccounts,
+				}
+				return nil
+			})
 		})
 
 		if updateErr != nil {
@@ -693,15 +687,12 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 		var deleteErr error
 
 		secret.Do(func() {
-			tree, err := manager.LoadAndDecrypt(ctx)
-			if err != nil {
-				deleteErr = err
-				return
-			}
-			if tree.Nodes != nil {
-				delete(tree.Nodes, deletePath)
-				deleteErr = manager.EncryptAndSave(ctx, tree)
-			}
+			deleteErr = manager.UpdateVault(ctx, func(tree *VaultTree) error {
+				if tree.Nodes != nil {
+					delete(tree.Nodes, deletePath)
+				}
+				return nil
+			})
 		})
 
 		if deleteErr != nil {

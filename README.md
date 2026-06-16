@@ -23,7 +23,51 @@ No external databases or heavy Vault installations are required.
 2. **Unlocking:** An administrator provides the Master Key via the local Web UI, or the system auto-fetches it via a Cloud KMS plugin.
 3. **Administration:** Using the local Web UI, administrators can blind-write new secrets and define Access Control Lists (ACLs). The Web UI masks all values and strips plaintext before rendering HTML to prevent memory leaks.
 4. **Encryption:** The Provider serializes and encrypts the tree using the `age` public key, storing it in `kube-system/age-vault-backend`.
-5. **Mounting:** When a Pod requests a secret, the Provider dynamically decrypts the Vault Tree *in-memory*, evaluates the ACL against the requesting Pod's Namespace/ServiceAccount, and securely mounts the secret into the Pod.
+5. **Concurrent-Safe Writes:** The Web UI and any write path use optimistic locking (`ResourceVersion`) on the Kubernetes Secret. If multiple pods (or multiple users) try to update the vault simultaneously, the first one succeeds and the others automatically retry their read-modify-write cycle up to 5 times. This prevents lost updates when running multiple DaemonSet replicas per node.
+6. **Mounting:** When a Pod requests a secret, the Provider dynamically decrypts the Vault Tree *in-memory*, evaluates the ACL against the requesting Pod's Namespace/ServiceAccount, and securely mounts the secret into the Pod.
+
+```mermaid
+flowchart TB
+    subgraph K8sCluster["Kubernetes Cluster"]
+        subgraph NodeA["Node A"]
+            PodA1["Workload Pod"]
+            DS_A["DaemonSet Pod<br/>gRPC CSI + HTTP UI"]
+        end
+
+        subgraph NodeB["Node B"]
+            PodB1["Workload Pod"]
+            DS_B["DaemonSet Pod<br/>gRPC CSI + HTTP UI"]
+        end
+
+        subgraph NodeC["Node N ..."]
+            DS_C["DaemonSet Pod<br/>gRPC CSI + HTTP UI"]
+        end
+
+        subgraph APIServer["API Server"]
+            Secret[("Kubernetes Secret<br/>age-vault-backend")]
+            RV["ResourceVersion<br/>Optimistic Lock"]
+        end
+    end
+
+    Admin["Admin Browser"] -. "HTTP /update<br/>Read → Modify → Write" .-> DS_A
+    Admin -. "HTTP /delete" .-> DS_B
+
+    PodA1 -->|"MountRequest<br/>/db/pass"| DS_A
+    DS_A -->|"Get Secret<br/>Decrypt Tree"| Secret
+    DS_A -->|"Return File<br/>/mnt/secrets/db-pass"| PodA1
+
+    PodB1 -->|"MountRequest"| DS_B
+    DS_B -->|"Get Secret"| Secret
+    DS_B -->|"Return File"| PodB1
+
+    DS_A -. "Update Secret<br/>with ResourceVersion" .-> Secret
+    DS_B -. "Update Secret<br/>with ResourceVersion" .-> Secret
+    DS_C -. "Update Secret<br/>with ResourceVersion" .-> Secret
+
+    Secret -.-> RV
+    RV -. "Conflict = Retry" .-> DS_B
+    RV -. "Conflict = Retry" .-> DS_C
+```
 
 ---
 
@@ -60,6 +104,8 @@ Verify the daemonset is running:
 ```bash
 kubectl get pods -n kube-system -l app=age-vault-csi
 ```
+
+> **Note on Multiple Replicas:** The DaemonSet can safely run multiple provider pods per node. All instances share the same encrypted Kubernetes Secret backend. The built-in optimistic locking (`ResourceVersion` retries) ensures that concurrent writes from different pods (or concurrent UI sessions) never overwrite each other.
 
 ### 3. Unlock the Vault via Web UI
 By default, the provider starts in **Locked** mode. Pods trying to mount secrets will hang in the `ContainerCreating` state until the vault is unlocked.
@@ -205,6 +251,44 @@ When the pod starts:
 1. If the vault is locked, the Pod will wait safely in `ContainerCreating`.
 2. Once unlocked, the CSI driver verifies that `production` and `db-client` are allowed to read `/db/postgres/password`.
 3. If successful, the plaintext secret is mounted as a file at `/mnt/secrets/db-pass`.
+
+## End-to-End Testing
+
+A self-contained e2e test suite is included in `e2e/e2e_test.go`. It validates the entire stack by spinning up a real [kind](https://kind.sigs.k8s.io/) cluster, building the provider image, deploying the driver, installing the Secrets Store CSI Driver, and verifying that secrets can be mounted into a pod.
+
+### Prerequisites
+
+- `kind`
+- `helm`
+- `kubectl`
+- `docker` or `podman` (auto-detected; override with `CONTAINER_RUNTIME=podman`)
+
+### Run the E2E tests
+
+```bash
+go test -tags e2e ./e2e -run TestE2E -count=1 -v
+```
+
+What happens under the hood:
+
+1. **Create a Kind cluster** (`csi-secret-age-cluster`).
+2. **Build the image** (`csi-secret-age:e2e`) and load it into the cluster.
+3. **Deploy the driver** — RBAC, a throwaway `age` master key Secret, and the DaemonSet.
+4. **Install the Secrets Store CSI Driver** via Helm with the provider path configured.
+5. **Run smoke tests** — verify the driver is registered and the gRPC socket is alive.
+6. **Run mounting validation** — add a secret via the HTTP admin API, create a `SecretProviderClass`, mount it into a `busybox` pod, and read the file back to confirm the secret was delivered.
+
+### Useful options
+
+```bash
+# Keep the cluster alive after the test for debugging
+SKIP_TEARDOWN=true go test -tags e2e ./e2e -run TestE2E -count=1 -v
+
+# Force a specific container runtime
+CONTAINER_RUNTIME=podman go test -tags e2e ./e2e -run TestE2E -count=1 -v
+```
+
+---
 
 ## Advanced Security: Hardware Memory Wiping
 
