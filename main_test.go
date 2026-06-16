@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -25,9 +26,9 @@ import (
 )
 
 // Helper: Generate a throwaway age key for testing
-func generateTestMasterKey(t *testing.T) string {
+func generateTestMasterKey(tb testing.TB) string {
 	identity, err := age.GenerateX25519Identity()
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	return identity.String()
 }
 
@@ -515,4 +516,92 @@ func TestPermissionManager_ValidateJWT(t *testing.T) {
 
 	_, err = pm.ValidateJWT(noSubTokenString)
 	require.Error(t, err)
+}
+
+// buildBenchmarkTree creates a tree with n nodes, each node is a leaf with a 64-byte secret.
+func buildBenchmarkTree(n int) *VaultTree {
+	tree := &VaultTree{Nodes: make(map[string]*VaultNode, n)}
+	for i := 0; i < n; i++ {
+		path := fmt.Sprintf("/app/%d/secret", i)
+		tree.Nodes[path] = &VaultNode{
+			Value:                  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+			AllowedNamespaces:      []string{"prod"},
+			AllowedServiceAccounts: []string{"app"},
+		}
+	}
+	return tree
+}
+
+func BenchmarkVaultManager_LoadAndDecrypt_Small(b *testing.B) {
+	ctx := context.Background()
+	masterKey := generateTestMasterKey(b)
+	cfg := Config{MasterKey: masterKey, VaultSecretName: "bench-vault", VaultNamespace: "kube-system"}
+	mgr := NewVaultManager(cfg, fake.NewSimpleClientset(), &EnvKeyProvider{Key: masterKey})
+
+	require.NoError(b, mgr.EncryptAndSave(ctx, buildBenchmarkTree(10)))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := mgr.LoadAndDecrypt(ctx)
+		require.NoError(b, err)
+	}
+}
+
+func BenchmarkVaultManager_LoadAndDecrypt_Medium(b *testing.B) {
+	ctx := context.Background()
+	masterKey := generateTestMasterKey(b)
+	cfg := Config{MasterKey: masterKey, VaultSecretName: "bench-vault", VaultNamespace: "kube-system"}
+	mgr := NewVaultManager(cfg, fake.NewSimpleClientset(), &EnvKeyProvider{Key: masterKey})
+
+	require.NoError(b, mgr.EncryptAndSave(ctx, buildBenchmarkTree(100)))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := mgr.LoadAndDecrypt(ctx)
+		require.NoError(b, err)
+	}
+}
+
+func BenchmarkVaultManager_LoadAndDecrypt_Large(b *testing.B) {
+	ctx := context.Background()
+	masterKey := generateTestMasterKey(b)
+	cfg := Config{MasterKey: masterKey, VaultSecretName: "bench-vault", VaultNamespace: "kube-system"}
+	mgr := NewVaultManager(cfg, fake.NewSimpleClientset(), &EnvKeyProvider{Key: masterKey})
+
+	require.NoError(b, mgr.EncryptAndSave(ctx, buildBenchmarkTree(1000)))
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := mgr.LoadAndDecrypt(ctx)
+		require.NoError(b, err)
+	}
+}
+
+func BenchmarkProviderServer_Mount(b *testing.B) {
+	ctx := context.Background()
+	fakeClient := fake.NewSimpleClientset()
+	masterKey := generateTestMasterKey(b)
+	cfg := Config{MasterKey: masterKey, VaultSecretName: "bench-vault", VaultNamespace: "kube-system"}
+	mgr := NewVaultManager(cfg, fakeClient, &EnvKeyProvider{Key: masterKey})
+
+	require.NoError(b, mgr.EncryptAndSave(ctx, buildBenchmarkTree(100)))
+
+	server := &ProviderServer{manager: mgr, logger: getTestLogger()}
+	req := &v1alpha1.MountRequest{
+		Attributes: func() string {
+			attrs := map[string]string{
+				"csi.storage.k8s.io/pod.namespace":       "prod",
+				"csi.storage.k8s.io/serviceAccount.name": "app",
+				"secrets":                                "secret0=/app/0/secret",
+			}
+			b, _ := json.Marshal(attrs)
+			return string(b)
+		}(),
+	}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, err := server.Mount(ctx, req)
+		require.NoError(b, err)
+	}
 }
