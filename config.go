@@ -22,6 +22,13 @@ type Config struct {
 	// When set and compiled with the 'kms' build tag, the provider fetches the
 	// age master key from AWS KMS at startup instead of using MASTER_KEY.
 	KMSCiphertext string `env:"KMS_CIPHERTEXT"`
+
+	// GCPKMSKeyName is the resource name of the GCP KMS CryptoKey used for decryption.
+	// Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}
+	// When set with GCPKMSCiphertext and compiled with 'gcpkms' build tag, the provider
+	// fetches the age master key from GCP KMS.
+	GCPKMSKeyName    string `env:"GCP_KMS_KEY_NAME"`
+	GCPKMSCiphertext string `env:"GCP_KMS_CIPHERTEXT"`
 }
 
 // MasterKeyProvider defines an interface for fetching the master age key
@@ -42,5 +49,5 @@ func (e *EnvKeyProvider) GetMasterKey(ctx context.Context) (string, error) {
 	return e.Key, nil
 }
 
-// resolveKeyProvider is implemented in keyprovider_kms.go (build tag: kms)
-// or keyprovider_default.go (build tag: !kms).
+// resolveKeyProvider is implemented in keyprovider.go with optional
+// cloud provider backends registered via init() in build-tagged files.

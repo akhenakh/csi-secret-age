@@ -120,6 +120,17 @@ kubectl port-forward -n kube-system ds/age-vault-csi 8090:8090
 
 *(Note: You can also choose to mount the master key as an environment variable `MASTER_KEY` or implement the `MasterKeyProvider` interface to fetch it from a Cloud KMS automatically on boot).*
 
+### 4. (Optional) Unlock via Cloud KMS
+
+Instead of storing the master key in a Kubernetes Secret, you can encrypt it with a cloud KMS and let the provider fetch it at startup. This requires building with the appropriate build tag.
+
+| Cloud | Build Tag | Guide |
+|-------|-----------|-------|
+| AWS KMS | `kms` | [README_AWS.md](README_AWS.md) |
+| GCP Cloud KMS | `gcpkms` | [README_GCP.md](README_GCP.md) |
+
+Both providers can be enabled simultaneously with `-tags "kms,gcpkms"`. The cloud SDK dependencies live in separate Go modules (`kms/`, `gcpkms/`) and are never pulled into the base binary unless the build tag is active.
+
 ---
 
 ## Web UI User Permissions (Production)

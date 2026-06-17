@@ -56,7 +56,7 @@ func main() {
 	}
 
 	// Auto-generate a throwaway key in dev mode so the vault is immediately usable
-	if cfg.DevMode && cfg.MasterKey == "" && cfg.KMSCiphertext == "" {
+	if cfg.DevMode && cfg.MasterKey == "" && cfg.KMSCiphertext == "" && cfg.GCPKMSCiphertext == "" {
 		identity, err := age.GenerateX25519Identity()
 		if err != nil {
 			logger.Error("Failed to generate dev mode master key", "error", err)

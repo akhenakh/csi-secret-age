@@ -19,6 +19,27 @@ stringData:
 #   namespace: kube-system
 # stringData:
 #   ciphertext: "<base64-encoded-blob>"
+# ---
+# Optional: GCP KMS encrypted age master key ciphertext.
+# When using GCP KMS, set GCP_KMS_KEY_NAME and GCP_KMS_CIPHERTEXT
+# instead of MASTER_KEY and build with --build-arg GCPKMS_ENABLED=true.
+# The ciphertext is generated with:
+#   gcloud kms encrypt --location global --keyring my-keyring --key my-key --plaintext-file key.txt --ciphertext-file - | base64 -w0
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: age-gcpkms-ciphertext
+#   namespace: kube-system
+# stringData:
+#   ciphertext: "<base64-encoded-blob>"
+# ---
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: age-gcpkms-key
+#   namespace: kube-system
+# stringData:
+#   keyName: "projects/my-project/locations/global/keyRings/my-keyring/cryptoKeys/my-key"
 ---
 apiVersion: v1
 kind: Secret
@@ -107,6 +128,17 @@ spec:
             #   valueFrom:
             #     secretKeyRef:
             #       name: age-kms-ciphertext
+            #       key: ciphertext
+            # Uncomment to use GCP KMS instead of MASTER_KEY:
+            # - name: GCP_KMS_KEY_NAME
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: age-gcpkms-key
+            #       key: keyName
+            # - name: GCP_KMS_CIPHERTEXT
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: age-gcpkms-ciphertext
             #       key: ciphertext
             - name: JWT_PUBLIC_KEY
               valueFrom:
