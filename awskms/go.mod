@@ -1,4 +1,4 @@
-module github.com/akhenakh/csi-secret-age/kms
+module github.com/akhenakh/csi-secret-age/awskms
 
 go 1.26.3
 

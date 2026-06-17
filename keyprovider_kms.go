@@ -6,12 +6,12 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/akhenakh/csi-secret-age/kms"
+	awskms "github.com/akhenakh/csi-secret-age/awskms"
 )
 
 type awsKMSKeyProvider struct {
 	ciphertext string
-	client     *kms.Client
+	client     *awskms.Client
 }
 
 func (p *awsKMSKeyProvider) GetMasterKey(ctx context.Context) (string, error) {
@@ -23,12 +23,12 @@ func init() {
 		if cfg.KMSCiphertext == "" {
 			return nil
 		}
-		kmsClient, err := kms.NewClient(context.Background())
+		awsClient, err := awskms.NewClient(context.Background())
 		if err != nil {
 			slog.Error("Failed to create AWS KMS client, falling back to env key provider", "error", err)
 			return nil
 		}
 		slog.Info("Using AWS KMS to fetch age master key")
-		return &awsKMSKeyProvider{ciphertext: cfg.KMSCiphertext, client: kmsClient}
+		return &awsKMSKeyProvider{ciphertext: cfg.KMSCiphertext, client: awsClient}
 	})
 }

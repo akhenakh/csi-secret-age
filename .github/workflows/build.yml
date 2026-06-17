@@ -24,9 +24,9 @@ jobs:
 
       # Verify build with both KMS tags compiles
       - run: |
-          go work init && go work use . ./kms ./gcpkms
+          go work init && go work use . ./awskms ./gcpkms
           GOEXPERIMENT=runtimesecret go build -tags "kms,gcpkms" -o /dev/null .
-      - run: GOEXPERIMENT=runtimesecret go test -tags "kms,gcpkms" ./... ./kms/ ./gcpkms/
+      - run: GOEXPERIMENT=runtimesecret go test -tags "kms,gcpkms" ./... ./awskms/ ./gcpkms/
 
   build:
     needs: test

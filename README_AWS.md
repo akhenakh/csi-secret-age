@@ -14,7 +14,7 @@ The AWS KMS client uses the standard AWS credential chain (env vars, instance pr
 
 ## Dependency Isolation
 
-The KMS integration lives in a separate Go module (`kms/`) with its own `go.mod`. The root module's `go.mod` has no AWS SDK dependencies. The two modules are only tied together by a local `go.work` file (gitignored) that you create when building with `-tags kms`.
+The KMS integration lives in a separate Go module (`awskms/`) with its own `go.mod`. The root module's `go.mod` has no AWS SDK dependencies. The two modules are only tied together by a local `go.work` file (gitignored) that you create when building with `-tags kms`.
 
 Without `go.work`, building the base project pulls zero AWS SDK packages — `go mod download` fetches only the root module's deps.
 
@@ -69,7 +69,7 @@ Remove or comment out the `MASTER_KEY` env var — the KMS provider takes preced
 First, create a local workspace so the Go toolchain finds the `kms` submodule:
 
 ```bash
-go work init && go work use . ./kms
+go work init && go work use . ./awskms
 ```
 
 Then build:

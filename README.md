@@ -129,7 +129,7 @@ Instead of storing the master key in a Kubernetes Secret, you can encrypt it wit
 | AWS KMS | `kms` | [README_AWS.md](README_AWS.md) |
 | GCP Cloud KMS | `gcpkms` | [README_GCP.md](README_GCP.md) |
 
-Both providers can be enabled simultaneously with `-tags "kms,gcpkms"`. The cloud SDK dependencies live in separate Go modules (`kms/`, `gcpkms/`) and are never pulled into the base binary unless the build tag is active.
+Both providers can be enabled simultaneously with `-tags "kms,gcpkms"`. The cloud SDK dependencies live in separate Go modules (`awskms/`, `gcpkms/`) and are never pulled into the base binary unless the build tag is active.
 
 ---
 
