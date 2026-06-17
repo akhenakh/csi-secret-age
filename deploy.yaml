@@ -5,10 +5,10 @@ metadata:
   namespace: kube-system
 stringData:
   # Generated using `age-keygen`
-  MASTER_KEY: "AGE-SECRET-KEY-1..."
+  key.txt: "AGE-SECRET-KEY-1..."
 ---
 # Optional: AWS KMS encrypted age master key ciphertext.
-# When using AWS KMS, set KMS_CIPHERTEXT instead of MASTER_KEY
+# When using AWS KMS, set KMS_CIPHERTEXT_FILE instead of MASTER_KEY_FILE
 # and build the image with --build-arg KMS_ENABLED=true.
 # The ciphertext is generated with:
 #   aws kms encrypt --key-id <arn> --plaintext fileb://key.txt --output text --query CiphertextBlob
@@ -21,8 +21,8 @@ stringData:
 #   ciphertext: "<base64-encoded-blob>"
 # ---
 # Optional: GCP KMS encrypted age master key ciphertext.
-# When using GCP KMS, set GCP_KMS_KEY_NAME and GCP_KMS_CIPHERTEXT
-# instead of MASTER_KEY and build with --build-arg GCPKMS_ENABLED=true.
+# When using GCP KMS, set GCP_KMS_KEY_NAME_FILE and GCP_KMS_CIPHERTEXT_FILE
+# instead of MASTER_KEY_FILE and build with --build-arg GCPKMS_ENABLED=true.
 # The ciphertext is generated with:
 #   gcloud kms encrypt --location global --keyring my-keyring --key my-key --plaintext-file key.txt --ciphertext-file - | base64 -w0
 # apiVersion: v1
@@ -48,7 +48,7 @@ metadata:
   namespace: kube-system
 stringData:
   # PEM-encoded RSA public key used to validate JWT tokens from the Web UI
-  JWT_PUBLIC_KEY: |
+  jwt-public-key.pem: |
     -----BEGIN PUBLIC KEY-----
     MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
     -----END PUBLIC KEY-----
@@ -83,7 +83,10 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: ["age-vault-backend"]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -118,33 +121,18 @@ spec:
         - name: csi-driver
           image: age-vault-csi:latest
           env:
-            - name: MASTER_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: age-master-key
-                  key: MASTER_KEY
-            # Uncomment to use AWS KMS instead of MASTER_KEY:
-            # - name: KMS_CIPHERTEXT
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: age-kms-ciphertext
-            #       key: ciphertext
-            # Uncomment to use GCP KMS instead of MASTER_KEY:
-            # - name: GCP_KMS_KEY_NAME
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: age-gcpkms-key
-            #       key: keyName
-            # - name: GCP_KMS_CIPHERTEXT
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: age-gcpkms-ciphertext
-            #       key: ciphertext
-            - name: JWT_PUBLIC_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: jwt-public-key
-                  key: JWT_PUBLIC_KEY
+            - name: MASTER_KEY_FILE
+              value: /etc/age-vault/secrets/master-key/key.txt
+            # Uncomment to use AWS KMS instead of MASTER_KEY_FILE:
+            # - name: KMS_CIPHERTEXT_FILE
+            #   value: /etc/age-vault/secrets/kms/ciphertext
+            # Uncomment to use GCP KMS instead of MASTER_KEY_FILE:
+            # - name: GCP_KMS_KEY_NAME_FILE
+            #   value: /etc/age-vault/secrets/gcpkms/keyName
+            # - name: GCP_KMS_CIPHERTEXT_FILE
+            #   value: /etc/age-vault/secrets/gcpkms/ciphertext
+            - name: JWT_PUBLIC_KEY_FILE
+              value: /etc/age-vault/secrets/jwt/jwt-public-key.pem
             - name: PERM_CONFIG_PATH
               value: /etc/age-vault/perm.yaml
             - name: SOCKET_PATH
@@ -154,6 +142,12 @@ spec:
               mountPath: /csi
             - name: perms-config
               mountPath: /etc/age-vault
+            - name: master-key-secret
+              mountPath: /etc/age-vault/secrets/master-key
+              readOnly: true
+            - name: jwt-public-key-secret
+              mountPath: /etc/age-vault/secrets/jwt
+              readOnly: true
       volumes:
         - name: providers-socket-dir
           hostPath:
@@ -162,3 +156,9 @@ spec:
         - name: perms-config
           configMap:
             name: age-vault-perms
+        - name: master-key-secret
+          secret:
+            secretName: age-master-key
+        - name: jwt-public-key-secret
+          secret:
+            secretName: jwt-public-key

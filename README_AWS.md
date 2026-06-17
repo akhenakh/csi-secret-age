@@ -1,6 +1,6 @@
 # AWS KMS Integration
 
-The provider can fetch its age master key from AWS KMS instead of an environment variable. This keeps the plaintext key off disk and out of Kubernetes Secrets.
+The provider can fetch its age master key from AWS KMS instead of storing it as an environment variable or file. This keeps the plaintext key off disk and out of Kubernetes Secrets.
 
 ## How It Works
 
@@ -62,7 +62,25 @@ Add the `KMS_CIPHERTEXT` env var to the DaemonSet container (see `deploy.yaml` f
       key: ciphertext
 ```
 
-Remove or comment out the `MASTER_KEY` env var — the KMS provider takes precedence when `KMS_CIPHERTEXT` is set.
+Alternatively, read the ciphertext from a mounted file using `KMS_CIPHERTEXT_FILE` (preferred — avoids exposing the value in environment variables):
+
+```yaml
+volumes:
+  - name: kms-ciphertext
+    secret:
+      secretName: age-kms-ciphertext
+containers:
+  - name: age-vault-csi
+    volumeMounts:
+      - name: kms-ciphertext
+        mountPath: /etc/age-vault/kms
+        readOnly: true
+    env:
+      - name: KMS_CIPHERTEXT_FILE
+        value: /etc/age-vault/kms/ciphertext
+```
+
+Remove or comment out the `MASTER_KEY` env var — the KMS provider takes precedence when `KMS_CIPHERTEXT` (or `KMS_CIPHERTEXT_FILE`) is set.
 
 ### 5. Build with the `kms` tag
 
@@ -102,4 +120,4 @@ Attach this policy via IRSA (IAM Roles for Service Accounts) or the node's insta
 
 ## Fallback Behavior
 
-If `KMS_CIPHERTEXT` is unset or the KMS client fails to initialize, the provider falls back to the `MASTER_KEY` env var. This works both with and without the `kms` build tag — the binary compiled without `-tags kms` simply ignores `KMS_CIPHERTEXT`.
+If neither `KMS_CIPHERTEXT` nor `KMS_CIPHERTEXT_FILE` is set, or the KMS client fails to initialize, the provider falls back to the `MASTER_KEY` (or `MASTER_KEY_FILE`) env var. This works both with and without the `kms` build tag — the binary compiled without `-tags kms` simply ignores the KMS fields.

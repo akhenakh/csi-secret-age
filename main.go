@@ -28,6 +28,10 @@ func main() {
 		fmt.Printf("failed to parse config: %+v\n", err)
 		os.Exit(1)
 	}
+	if err := cfg.ResolveSecrets(); err != nil {
+		fmt.Printf("failed to resolve secrets: %+v\n", err)
+		os.Exit(1)
+	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 

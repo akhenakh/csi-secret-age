@@ -1,6 +1,6 @@
 # GCP KMS Integration
 
-The provider can fetch its age master key from GCP Cloud KMS instead of an environment variable. This keeps the plaintext key off disk and out of Kubernetes Secrets.
+The provider can fetch its age master key from GCP Cloud KMS instead of storing it as an environment variable or file. This keeps the plaintext key off disk and out of Kubernetes Secrets.
 
 ## How It Works
 
@@ -76,6 +76,26 @@ Add the `GCP_KMS_CIPHERTEXT` and `GCP_KMS_KEY_NAME` env vars to the DaemonSet co
       key: ciphertext
 ```
 
+Alternatively, read the values from mounted files using the `_FILE` variants (preferred — avoids exposing values in environment variables):
+
+```yaml
+volumes:
+  - name: gcpkms-config
+    secret:
+      secretName: age-gcpkms-config
+containers:
+  - name: age-vault-csi
+    volumeMounts:
+      - name: gcpkms-config
+        mountPath: /etc/age-vault/gcpkms
+        readOnly: true
+    env:
+      - name: GCP_KMS_KEY_NAME_FILE
+        value: /etc/age-vault/gcpkms/keyname
+      - name: GCP_KMS_CIPHERTEXT_FILE
+        value: /etc/age-vault/gcpkms/ciphertext
+```
+
 Remove or comment out the `MASTER_KEY` env var.
 
 ### 5. Build with the `gcpkms` tag
@@ -120,4 +140,4 @@ Use Workload Identity to bind the Kubernetes service account to the GCP service 
 
 ## Fallback Behavior
 
-If `GCP_KMS_CIPHERTEXT` or `GCP_KMS_KEY_NAME` is unset, or the KMS client fails to initialize, the provider falls back to the `MASTER_KEY` env var. This works both with and without the `gcpkms` build tag — the binary compiled without `-tags gcpkms` simply ignores the GCP env vars.
+If neither `GCP_KMS_CIPHERTEXT`/`GCP_KMS_CIPHERTEXT_FILE` nor `GCP_KMS_KEY_NAME`/`GCP_KMS_KEY_NAME_FILE` is set, or the KMS client fails to initialize, the provider falls back to the `MASTER_KEY` (or `MASTER_KEY_FILE`) env var. This works both with and without the `gcpkms` build tag — the binary compiled without `-tags gcpkms` simply ignores the GCP env vars.

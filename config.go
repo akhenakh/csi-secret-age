@@ -3,11 +3,22 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"strings"
 )
 
-// Config represents environment configurations
+// Config represents environment configurations.
+// Secret fields support a _FILE suffix (e.g. MASTER_KEY_FILE) to read the
+// value from a file instead of an environment variable. When both the inline
+// and file variants are set, the file takes precedence.
 type Config struct {
-	MasterKey       string `env:"MASTER_KEY"` // No longer required to start up
+	// MasterKey is the age identity (secret key) used to encrypt/decrypt the vault.
+	// Not required at startup; the vault can be unlocked later via the Web UI.
+	// Use MasterKeyFile to read from a file instead.
+	MasterKey     string `env:"MASTER_KEY"`
+	MasterKeyFile string `env:"MASTER_KEY_FILE"`
+
 	VaultSecretName string `env:"VAULT_SECRET_NAME" envDefault:"age-vault-backend"`
 	VaultNamespace  string `env:"VAULT_NAMESPACE" envDefault:"kube-system"`
 	SocketPath      string `env:"SOCKET_PATH" envDefault:"/tmp/age-vault.sock"`
@@ -15,20 +26,29 @@ type Config struct {
 	DevMode         bool   `env:"DEV_MODE" envDefault:"false"`
 
 	PermConfigPath string `env:"PERM_CONFIG_PATH"`
-	JWTPublicKey   string `env:"JWT_PUBLIC_KEY"`
-	JWTUserClaim   string `env:"JWT_USER_CLAIM" envDefault:"sub"`
+	// JWTPublicKey is the PEM-encoded RSA public key used to validate JWT tokens
+	// for the permission system. Use JWTPublicKeyFile to read from a file instead.
+	JWTPublicKey     string `env:"JWT_PUBLIC_KEY"`
+	JWTPublicKeyFile string `env:"JWT_PUBLIC_KEY_FILE"`
+	JWTUserClaim     string `env:"JWT_USER_CLAIM" envDefault:"sub"`
 
 	// KMSCiphertext is the base64-encoded ciphertext blob from AWS KMS encrypt.
 	// When set and compiled with the 'kms' build tag, the provider fetches the
 	// age master key from AWS KMS at startup instead of using MASTER_KEY.
-	KMSCiphertext string `env:"KMS_CIPHERTEXT"`
+	// Use KMSCiphertextFile to read from a file instead.
+	KMSCiphertext     string `env:"KMS_CIPHERTEXT"`
+	KMSCiphertextFile string `env:"KMS_CIPHERTEXT_FILE"`
 
 	// GCPKMSKeyName is the resource name of the GCP KMS CryptoKey used for decryption.
 	// Format: projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}
 	// When set with GCPKMSCiphertext and compiled with 'gcpkms' build tag, the provider
-	// fetches the age master key from GCP KMS.
-	GCPKMSKeyName    string `env:"GCP_KMS_KEY_NAME"`
-	GCPKMSCiphertext string `env:"GCP_KMS_CIPHERTEXT"`
+	// fetches the age master key from GCP KMS. Use GCPKMSKeyNameFile to read from a file.
+	GCPKMSKeyName     string `env:"GCP_KMS_KEY_NAME"`
+	GCPKMSKeyNameFile string `env:"GCP_KMS_KEY_NAME_FILE"`
+	// GCPKMSCiphertext is the base64-encoded ciphertext blob from GCP KMS encrypt.
+	// Use GCPKMSCiphertextFile to read from a file instead.
+	GCPKMSCiphertext     string `env:"GCP_KMS_CIPHERTEXT"`
+	GCPKMSCiphertextFile string `env:"GCP_KMS_CIPHERTEXT_FILE"`
 }
 
 // MasterKeyProvider defines an interface for fetching the master age key
@@ -47,6 +67,44 @@ func (e *EnvKeyProvider) GetMasterKey(ctx context.Context) (string, error) {
 		return "", errors.New("master key not found in environment")
 	}
 	return e.Key, nil
+}
+
+// resolveSecretValue reads a secret from a file if filePath is set, otherwise
+// falls back to the inline value. File content is trimmed of leading/trailing
+// whitespace. File takes precedence over the inline value when both are set.
+func resolveSecretValue(inline, filePath string) (string, error) {
+	if filePath != "" {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return "", fmt.Errorf("failed to read secret file %q: %w", filePath, err)
+		}
+		return strings.TrimSpace(string(data)), nil
+	}
+	return inline, nil
+}
+
+// ResolveSecrets resolves file-backed secret values, preferring files over
+// inline environment values. Call this after env.Parse.
+func (c *Config) ResolveSecrets() error {
+	resolvers := []struct {
+		name     string
+		inline   *string
+		filePath string
+	}{
+		{"MASTER_KEY", &c.MasterKey, c.MasterKeyFile},
+		{"JWT_PUBLIC_KEY", &c.JWTPublicKey, c.JWTPublicKeyFile},
+		{"KMS_CIPHERTEXT", &c.KMSCiphertext, c.KMSCiphertextFile},
+		{"GCP_KMS_KEY_NAME", &c.GCPKMSKeyName, c.GCPKMSKeyNameFile},
+		{"GCP_KMS_CIPHERTEXT", &c.GCPKMSCiphertext, c.GCPKMSCiphertextFile},
+	}
+	for _, r := range resolvers {
+		val, err := resolveSecretValue(*r.inline, r.filePath)
+		if err != nil {
+			return fmt.Errorf("%s: %w", r.name, err)
+		}
+		*r.inline = val
+	}
+	return nil
 }
 
 // resolveKeyProvider is implemented in keyprovider.go with optional

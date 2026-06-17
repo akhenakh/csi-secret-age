@@ -103,12 +103,12 @@ func TestHelmDeployment(t *testing.T) {
 	// 4. Deploy via Helm with KMS values
 	deployDriverViaHelm(t)
 
-	// 5. Verify KMS Secrets are created and DaemonSet has KMS env vars
+	// 5. Verify KMS Secrets are created and DaemonSet has KMS _FILE env vars
 	t.Run("KMS Secrets Created", func(t *testing.T) {
 		verifyKMSSecrets(t)
 	})
 
-	t.Run("KMS Env Vars in DaemonSet", func(t *testing.T) {
+	t.Run("KMS File Env Vars in DaemonSet", func(t *testing.T) {
 		verifyKMSEnvVars(t)
 	})
 }
@@ -203,7 +203,7 @@ metadata:
   name: age-master-key
   namespace: %s
 stringData:
-  MASTER_KEY: "%s"
+  key.txt: "%s"
 `, namespace, masterKey)
 	kubectlApply(t, secretManifest)
 
@@ -223,7 +223,10 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: ["age-vault-backend"]
-    verbs: ["get", "create", "update"]
+    verbs: ["get", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -263,21 +266,24 @@ spec:
               name: http-admin
               protocol: TCP
           env:
-            - name: MASTER_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: age-master-key
-                  key: MASTER_KEY
+            - name: MASTER_KEY_FILE
+              value: /etc/age-vault/secrets/master-key/key.txt
             - name: SOCKET_PATH
               value: /csi/agevault.sock
           volumeMounts:
             - name: providers-socket-dir
               mountPath: /csi
+            - name: master-key-secret
+              mountPath: /etc/age-vault/secrets/master-key
+              readOnly: true
       volumes:
         - name: providers-socket-dir
           hostPath:
             path: /var/lib/kubelet/plugins/secrets-store.csi.k8s.io/providers
             type: DirectoryOrCreate
+        - name: master-key-secret
+          secret:
+            secretName: age-master-key
 ---
 apiVersion: v1
 kind: Service
@@ -343,30 +349,30 @@ func verifyKMSSecrets(t *testing.T) {
 	}
 }
 
-// verifyKMSEnvVars checks that the DaemonSet pod has the KMS env vars configured.
+// verifyKMSEnvVars checks that the DaemonSet pod has the KMS _FILE env vars configured.
 func verifyKMSEnvVars(t *testing.T) {
-	t.Log("Verifying KMS env vars in DaemonSet...")
+	t.Log("Verifying KMS _FILE env vars in DaemonSet...")
 
 	podName := getDriverPodName(t, "app.kubernetes.io/name=csi-secret-age")
 
 	expectedVars := map[string]string{
-		"KMS_CIPHERTEXT":      "age-aws-kms-ciphertext",
-		"GCP_KMS_KEY_NAME":    "age-gcp-kms-key",
-		"GCP_KMS_CIPHERTEXT":  "age-gcp-kms-ciphertext",
+		"KMS_CIPHERTEXT_FILE":      "/etc/age-vault/secrets/aws-kms/ciphertext",
+		"GCP_KMS_KEY_NAME_FILE":   "/etc/age-vault/secrets/gcp-kms/keyName",
+		"GCP_KMS_CIPHERTEXT_FILE": "/etc/age-vault/secrets/gcp-kms/ciphertext",
 	}
 
-	for envVar, expectedSecret := range expectedVars {
+	for envVar, expectedValue := range expectedVars {
 		cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace,
-			"-o", fmt.Sprintf("jsonpath={.spec.containers[0].env[?(@.name=='%s')].valueFrom.secretKeyRef.name}", envVar))
+			"-o", fmt.Sprintf("jsonpath={.spec.containers[0].env[?(@.name=='%s')].value}", envVar))
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("Failed to get env var %s from pod %s: %v\nOutput: %s", envVar, podName, err, string(out))
 		}
 		actual := strings.TrimSpace(string(out))
-		if actual != expectedSecret {
-			t.Fatalf("Env var %s references wrong secret: expected %s, got %s", envVar, expectedSecret, actual)
+		if actual != expectedValue {
+			t.Fatalf("Env var %s has wrong value: expected %s, got %s", envVar, expectedValue, actual)
 		}
-		t.Logf("Env var %s references secret %s", envVar, actual)
+		t.Logf("Env var %s = %s", envVar, actual)
 	}
 
 	// Also verify the pod is running (even if locked, it should start)

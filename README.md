@@ -118,7 +118,7 @@ kubectl port-forward -n kube-system ds/age-vault-csi 8090:8090
 2. You will see the **Vault Locked 🔒** screen.
 3. Paste your `AGE-SECRET-KEY-...` into the form and click **Unlock**.
 
-*(Note: You can also choose to mount the master key as an environment variable `MASTER_KEY` or implement the `MasterKeyProvider` interface to fetch it from a Cloud KMS automatically on boot).*
+*(Note: You can also choose to mount the master key as an environment variable `MASTER_KEY`, read it from a file via `MASTER_KEY_FILE`, or implement the `MasterKeyProvider` interface to fetch it from a Cloud KMS automatically on boot).*
 
 ### 4. (Optional) Unlock via Cloud KMS
 
@@ -130,6 +130,38 @@ Instead of storing the master key in a Kubernetes Secret, you can encrypt it wit
 | GCP Cloud KMS | `gcpkms` | [README_GCP.md](README_GCP.md) |
 
 Both providers can be enabled simultaneously with `-tags "kms,gcpkms"`. The cloud SDK dependencies live in separate Go modules (`awskms/`, `gcpkms/`) and are never pulled into the base binary unless the build tag is active.
+
+### File-Backed Secrets
+
+All sensitive configuration values support a `_FILE` suffix to read from a file instead of an environment variable. This is the preferred approach in Kubernetes — mount the secret as a file via a `volumeMount` rather than injecting it as an env var (which can leak into process listings, logs, and crash dumps).
+
+| Environment Variable | File Variant | Purpose |
+|---|---|---|
+| `MASTER_KEY` | `MASTER_KEY_FILE` | Age identity (secret key) to unlock the vault |
+| `KMS_CIPHERTEXT` | `KMS_CIPHERTEXT_FILE` | Base64-encoded AWS KMS ciphertext blob |
+| `GCP_KMS_KEY_NAME` | `GCP_KMS_KEY_NAME_FILE` | GCP KMS CryptoKey resource name |
+| `GCP_KMS_CIPHERTEXT` | `GCP_KMS_CIPHERTEXT_FILE` | Base64-encoded GCP KMS ciphertext blob |
+| `JWT_PUBLIC_KEY` | `JWT_PUBLIC_KEY_FILE` | PEM-encoded RSA public key for JWT validation |
+
+When both the inline and file variants are set, the **file takes precedence**. File contents are trimmed of leading/trailing whitespace.
+
+Example — reading the master key from a mounted Kubernetes Secret:
+
+```yaml
+volumes:
+  - name: master-key
+    secret:
+      secretName: age-master-key
+containers:
+  - name: age-vault-csi
+    volumeMounts:
+      - name: master-key
+        mountPath: /etc/age-vault
+        readOnly: true
+    env:
+      - name: MASTER_KEY_FILE
+        value: /etc/age-vault/key.txt
+```
 
 ---
 
@@ -180,17 +212,21 @@ stringData:
 
 ### 3. Wire the environment variables
 
-The DaemonSet in `deploy.yaml` already includes the volume mounts and env vars:
+The DaemonSet in `deploy.yaml` already includes the volume mounts and env vars. You can provide secrets inline via environment variables or from mounted files using the `_FILE` suffix (file takes precedence when both are set):
 
 ```yaml
 env:
   - name: PERM_CONFIG_PATH
     value: /etc/age-vault/perm.yaml
+  # Option A: inline value
   - name: JWT_PUBLIC_KEY
     valueFrom:
       secretKeyRef:
         name: jwt-public-key
         key: JWT_PUBLIC_KEY
+  # Option B: read from a mounted file (preferred for large PEM keys)
+  # - name: JWT_PUBLIC_KEY_FILE
+  #   value: /etc/age-vault/jwt-public-key.pem
   - name: JWT_USER_CLAIM
     value: "sub"  # default; the JWT claim to use as the username
 ```

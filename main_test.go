@@ -689,3 +689,105 @@ func TestVaultManager_UpdateVault_Conflict(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "updated-after-conflict", loaded.Nodes["/db/pass"].Value)
 }
+
+func TestResolveSecretValue(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	keyFile := filepath.Join(tmpDir, "master.key")
+	require.NoError(t, os.WriteFile(keyFile, []byte("  AGE-SECRET-KEY-FROM-FILE  \n"), 0600))
+
+	tests := []struct {
+		name     string
+		inline   string
+		filePath string
+		want     string
+		wantErr  bool
+	}{
+		{
+			name:   "inline only",
+			inline: "inline-value",
+			want:   "inline-value",
+		},
+		{
+			name:     "file only",
+			filePath: keyFile,
+			want:     "AGE-SECRET-KEY-FROM-FILE",
+		},
+		{
+			name:     "file takes precedence over inline",
+			inline:   "inline-value",
+			filePath: keyFile,
+			want:     "AGE-SECRET-KEY-FROM-FILE",
+		},
+		{
+			name:     "both empty",
+			inline:   "",
+			filePath: "",
+			want:     "",
+		},
+		{
+			name:     "file not found",
+			filePath: filepath.Join(tmpDir, "nonexistent"),
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveSecretValue(tt.inline, tt.filePath)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+func TestConfig_ResolveSecrets(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	masterKeyFile := filepath.Join(tmpDir, "master.key")
+	require.NoError(t, os.WriteFile(masterKeyFile, []byte("AGE-SECRET-KEY-MASTER\n"), 0600))
+
+	kmsFile := filepath.Join(tmpDir, "kms.ct")
+	require.NoError(t, os.WriteFile(kmsFile, []byte("base64-kms-ciphertext\n"), 0600))
+
+	gcpKeyFile := filepath.Join(tmpDir, "gcp-keyname")
+	require.NoError(t, os.WriteFile(gcpKeyFile, []byte("projects/p/locations/l/keyRings/kr/cryptoKeys/ck\n"), 0600))
+
+	gcpCtFile := filepath.Join(tmpDir, "gcp.ct")
+	require.NoError(t, os.WriteFile(gcpCtFile, []byte("base64-gcp-ciphertext\n"), 0600))
+
+	jwtFile := filepath.Join(tmpDir, "jwt.pem")
+	require.NoError(t, os.WriteFile(jwtFile, []byte("-----BEGIN PUBLIC KEY-----\nfake\n-----END PUBLIC KEY-----\n"), 0600))
+
+	cfg := Config{
+		MasterKeyFile:        masterKeyFile,
+		KMSCiphertextFile:    kmsFile,
+		GCPKMSKeyNameFile:    gcpKeyFile,
+		GCPKMSCiphertextFile: gcpCtFile,
+		JWTPublicKeyFile:     jwtFile,
+	}
+	require.NoError(t, cfg.ResolveSecrets())
+
+	assert.Equal(t, "AGE-SECRET-KEY-MASTER", cfg.MasterKey)
+	assert.Equal(t, "base64-kms-ciphertext", cfg.KMSCiphertext)
+	assert.Equal(t, "projects/p/locations/l/keyRings/kr/cryptoKeys/ck", cfg.GCPKMSKeyName)
+	assert.Equal(t, "base64-gcp-ciphertext", cfg.GCPKMSCiphertext)
+	assert.Contains(t, cfg.JWTPublicKey, "BEGIN PUBLIC KEY")
+
+	cfg2 := Config{
+		MasterKey:    "inline-key",
+		KMSCiphertext: "inline-ct",
+	}
+	require.NoError(t, cfg2.ResolveSecrets())
+	assert.Equal(t, "inline-key", cfg2.MasterKey)
+	assert.Equal(t, "inline-ct", cfg2.KMSCiphertext)
+
+	cfg3 := Config{
+		MasterKeyFile: filepath.Join(tmpDir, "missing"),
+	}
+	require.Error(t, cfg3.ResolveSecrets())
+}
