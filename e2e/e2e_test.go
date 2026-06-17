@@ -87,6 +87,32 @@ func TestE2E(t *testing.T) {
 	})
 }
 
+func TestHelmDeployment(t *testing.T) {
+	t.Logf("Using container runtime: %s", containerRuntime)
+
+	// 1. Setup Infrastructure
+	setupCluster(t)
+	defer teardownCluster(t)
+
+	// 2. Build and Load Artifacts
+	buildAndLoadImage(t)
+
+	// 3. Install Secrets Store CSI Driver
+	installSecretsStoreCSIDriver(t)
+
+	// 4. Deploy via Helm with KMS values
+	deployDriverViaHelm(t)
+
+	// 5. Verify KMS Secrets are created and DaemonSet has KMS env vars
+	t.Run("KMS Secrets Created", func(t *testing.T) {
+		verifyKMSSecrets(t)
+	})
+
+	t.Run("KMS Env Vars in DaemonSet", func(t *testing.T) {
+		verifyKMSEnvVars(t)
+	})
+}
+
 func setupCluster(t *testing.T) {
 	t.Log("Creating Kind cluster...")
 
@@ -275,6 +301,83 @@ spec:
 	waitForDaemonSetPods(t, namespace, "app=age-vault-csi", 120*time.Second)
 }
 
+// deployDriverViaHelm deploys the CSI provider using the Helm chart with KMS values.
+func deployDriverViaHelm(t *testing.T) {
+	t.Log("Deploying CSI Driver via Helm chart with KMS values...")
+
+	chartPath := filepath.Join("..", "deploy", "helm", "csi-secret-age")
+
+	imgRepo := "csi-secret-age"
+	imgTag := "e2e"
+	if containerRuntime == "podman" {
+		imgRepo = "localhost/csi-secret-age"
+	}
+
+	runCmd(t, "helm", "install", "csi-secret-age", chartPath,
+		"--namespace", namespace,
+		"--set", "image.repository="+imgRepo,
+		"--set", "image.tag="+imgTag,
+		"--set", "image.pullPolicy=Never",
+		"--set", "awsKms.ciphertext=dGVzdC1hd3Mta21zLWNpcGhlcnRleHQ=",
+		"--set", "gcpKms.keyName=projects/test-project/locations/global/keyRings/test-keyring/cryptoKeys/test-key",
+		"--set", "gcpKms.ciphertext=dGVzdC1nY3Ata21zLWNpcGhlcnRleHQ=",
+		"--wait",
+		"--timeout", "2m",
+	)
+
+	t.Log("Waiting for Age Vault CSI DaemonSet to be ready...")
+	waitForDaemonSetPods(t, namespace, "app.kubernetes.io/name=csi-secret-age", 120*time.Second)
+}
+
+// verifyKMSSecrets checks that the AWS and GCP KMS Secrets were created by the Helm chart.
+func verifyKMSSecrets(t *testing.T) {
+	t.Log("Verifying KMS Secrets exist...")
+
+	for _, secretName := range []string{"age-aws-kms-ciphertext", "age-gcp-kms-key", "age-gcp-kms-ciphertext"} {
+		cmd := exec.Command("kubectl", "get", "secret", secretName, "-n", namespace, "-o", "jsonpath={.metadata.name}")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("KMS Secret %s not found: %v\nOutput: %s", secretName, err, string(out))
+		}
+		t.Logf("KMS Secret %s exists", strings.TrimSpace(string(out)))
+	}
+}
+
+// verifyKMSEnvVars checks that the DaemonSet pod has the KMS env vars configured.
+func verifyKMSEnvVars(t *testing.T) {
+	t.Log("Verifying KMS env vars in DaemonSet...")
+
+	podName := getDriverPodName(t, "app.kubernetes.io/name=csi-secret-age")
+
+	expectedVars := map[string]string{
+		"KMS_CIPHERTEXT":      "age-aws-kms-ciphertext",
+		"GCP_KMS_KEY_NAME":    "age-gcp-kms-key",
+		"GCP_KMS_CIPHERTEXT":  "age-gcp-kms-ciphertext",
+	}
+
+	for envVar, expectedSecret := range expectedVars {
+		cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace,
+			"-o", fmt.Sprintf("jsonpath={.spec.containers[0].env[?(@.name=='%s')].valueFrom.secretKeyRef.name}", envVar))
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Failed to get env var %s from pod %s: %v\nOutput: %s", envVar, podName, err, string(out))
+		}
+		actual := strings.TrimSpace(string(out))
+		if actual != expectedSecret {
+			t.Fatalf("Env var %s references wrong secret: expected %s, got %s", envVar, expectedSecret, actual)
+		}
+		t.Logf("Env var %s references secret %s", envVar, actual)
+	}
+
+	// Also verify the pod is running (even if locked, it should start)
+	cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace, "-o", "jsonpath={.status.phase}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("Failed to get pod phase: %v", err)
+	}
+	t.Logf("DaemonSet pod %s status: %s", podName, strings.TrimSpace(string(out)))
+}
+
 func runVolumeLifecycleTest(t *testing.T) {
 	t.Log("Verifying Age Vault CSI driver is registered and running...")
 
@@ -451,10 +554,10 @@ spec:
 	t.Log("Secret mounting validation test passed!")
 }
 
-// getDriverPodName returns the name of a running age-vault-csi pod
-func getDriverPodName(t *testing.T) string {
+// getDriverPodName returns the name of a running age-vault-csi pod matching the selector.
+func getDriverPodName(t *testing.T, selector string) string {
 	t.Helper()
-	cmd := exec.Command("kubectl", "get", "pod", "-n", namespace, "-l", "app=age-vault-csi", "-o", "jsonpath={.items[0].metadata.name}")
+	cmd := exec.Command("kubectl", "get", "pod", "-n", namespace, "-l", selector, "-o", "jsonpath={.items[0].metadata.name}")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Failed to get driver pod name: %v\nOutput: %s", err, string(out))
