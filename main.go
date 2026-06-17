@@ -56,18 +56,17 @@ func main() {
 	}
 
 	// Auto-generate a throwaway key in dev mode so the vault is immediately usable
-	masterKey := cfg.MasterKey
-	if cfg.DevMode && masterKey == "" {
+	if cfg.DevMode && cfg.MasterKey == "" && cfg.KMSCiphertext == "" {
 		identity, err := age.GenerateX25519Identity()
 		if err != nil {
 			logger.Error("Failed to generate dev mode master key", "error", err)
 			os.Exit(1)
 		}
-		masterKey = identity.String()
-		logger.Info("Dev mode auto-generated master key", "key", masterKey)
+		cfg.MasterKey = identity.String()
+		logger.Info("Dev mode auto-generated master key", "key", cfg.MasterKey)
 	}
 
-	keyProvider := &EnvKeyProvider{Key: masterKey}
+	keyProvider := resolveKeyProvider(&cfg)
 	manager := NewVaultManager(cfg, k8sClient, keyProvider)
 
 	var permMgr *PermissionManager

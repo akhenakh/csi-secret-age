@@ -3,7 +3,13 @@ WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOEXPERIMENT=runtimesecret go build -o csi-secret-age .
+ARG KMS_ENABLED=false
+RUN if [ "$KMS_ENABLED" = "true" ]; then \
+    (cd kms && go mod download) && go work init && go work use . ./kms && \
+    CGO_ENABLED=0 GOEXPERIMENT=runtimesecret go build -tags kms -o csi-secret-age . ; \
+    else \
+    CGO_ENABLED=0 GOEXPERIMENT=runtimesecret go build -o csi-secret-age . ; \
+    fi
 
 FROM gcr.io/distroless/static-debian12
 WORKDIR /

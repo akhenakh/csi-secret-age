@@ -7,6 +7,19 @@ stringData:
   # Generated using `age-keygen`
   MASTER_KEY: "AGE-SECRET-KEY-1..."
 ---
+# Optional: AWS KMS encrypted age master key ciphertext.
+# When using AWS KMS, set KMS_CIPHERTEXT instead of MASTER_KEY
+# and build the image with --build-arg KMS_ENABLED=true.
+# The ciphertext is generated with:
+#   aws kms encrypt --key-id <arn> --plaintext fileb://key.txt --output text --query CiphertextBlob
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: age-kms-ciphertext
+#   namespace: kube-system
+# stringData:
+#   ciphertext: "<base64-encoded-blob>"
+---
 apiVersion: v1
 kind: Secret
 metadata:
@@ -89,6 +102,12 @@ spec:
                 secretKeyRef:
                   name: age-master-key
                   key: MASTER_KEY
+            # Uncomment to use AWS KMS instead of MASTER_KEY:
+            # - name: KMS_CIPHERTEXT
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: age-kms-ciphertext
+            #       key: ciphertext
             - name: JWT_PUBLIC_KEY
               valueFrom:
                 secretKeyRef:

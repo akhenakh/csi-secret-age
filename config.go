@@ -17,6 +17,11 @@ type Config struct {
 	PermConfigPath string `env:"PERM_CONFIG_PATH"`
 	JWTPublicKey   string `env:"JWT_PUBLIC_KEY"`
 	JWTUserClaim   string `env:"JWT_USER_CLAIM" envDefault:"sub"`
+
+	// KMSCiphertext is the base64-encoded ciphertext blob from AWS KMS encrypt.
+	// When set and compiled with the 'kms' build tag, the provider fetches the
+	// age master key from AWS KMS at startup instead of using MASTER_KEY.
+	KMSCiphertext string `env:"KMS_CIPHERTEXT"`
 }
 
 // MasterKeyProvider defines an interface for fetching the master age key
@@ -37,5 +42,5 @@ func (e *EnvKeyProvider) GetMasterKey(ctx context.Context) (string, error) {
 	return e.Key, nil
 }
 
-// TODO: Implement Cloud Providers here (e.g. AWSKMSProvider, GCPKMSProvider)
-// func (a *AWSKMSProvider) GetMasterKey(ctx context.Context) (string, error) { ... }
+// resolveKeyProvider is implemented in keyprovider_kms.go (build tag: kms)
+// or keyprovider_default.go (build tag: !kms).
