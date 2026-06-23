@@ -73,7 +73,12 @@ func NewVaultManager(cfg Config, client kubernetes.Interface, keyProvider Master
 		defer cancel()
 
 		key, err := keyProvider.GetMasterKey(ctx)
-		if err == nil && key != "" {
+		switch {
+		case err != nil:
+			slog.Error("Failed to fetch master key from KeyProvider; vault remains locked", "error", err)
+		case key == "":
+			slog.Warn("KeyProvider returned an empty master key; vault remains locked")
+		default:
 			if unlockErr := vm.Unlock(key); unlockErr != nil {
 				slog.Error("Auto-unlock failed", "error", unlockErr)
 			} else {
