@@ -25,6 +25,7 @@ type Config struct {
 	SocketPath      string `env:"SOCKET_PATH" envDefault:"/tmp/csi-secret-age.sock"`
 	HTTPPort        int    `env:"HTTP_PORT" envDefault:"8090"`
 	DevMode         bool   `env:"DEV_MODE" envDefault:"false"`
+	LogLevel        string `env:"LOG_LEVEL" envDefault:"INFO"`
 
 	PermConfigPath string `env:"PERM_CONFIG_PATH"`
 	// JWTPublicKey is the PEM-encoded RSA public key used to validate JWT tokens

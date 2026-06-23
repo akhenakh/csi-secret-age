@@ -28,24 +28,39 @@ func getUserPerms(r *http.Request) *UserPermissions {
 	return nil
 }
 
-func withAuth(handler http.Handler, permMgr *PermissionManager) http.Handler {
+func withAuth(handler http.Handler, permMgr *PermissionManager, logger *slog.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if permMgr == nil {
+			logger.Debug("auth disabled: no permission manager configured")
 			handler.ServeHTTP(w, r)
 			return
 		}
 		authHeader := r.Header.Get("Authorization")
 		if !strings.HasPrefix(authHeader, "Bearer ") {
+			logger.Debug("JWT auth failed: missing or malformed Authorization header",
+				"path", r.URL.Path,
+				"remote_addr", r.RemoteAddr,
+			)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 		token := strings.TrimPrefix(authHeader, "Bearer ")
 		username, err := permMgr.ValidateJWT(token)
 		if err != nil {
+			logger.Debug("JWT validation failed",
+				"path", r.URL.Path,
+				"remote_addr", r.RemoteAddr,
+				"error", err,
+			)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 		userPerms := permMgr.GetUserPermissions(username)
+		logger.Debug("JWT auth succeeded",
+			"path", r.URL.Path,
+			"username", username,
+			"is_admin", userPerms.isAdmin,
+		)
 		ctx := context.WithValue(r.Context(), userPermsKey, userPerms)
 		handler.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -698,7 +713,7 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      withAuth(mux, permMgr),
+		Handler:      withAuth(mux, permMgr, logger),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,

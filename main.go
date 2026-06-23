@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"filippo.io/age"
@@ -22,6 +23,22 @@ import (
 	"sigs.k8s.io/secrets-store-csi-driver/provider/v1alpha1"
 )
 
+// slogLevel parses a log-level string into a slog.Level.
+func slogLevel(level string) (slog.Level, error) {
+	switch strings.ToUpper(level) {
+	case "DEBUG":
+		return slog.LevelDebug, nil
+	case "INFO":
+		return slog.LevelInfo, nil
+	case "WARN", "WARNING":
+		return slog.LevelWarn, nil
+	case "ERROR":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf("unknown log level %q", level)
+	}
+}
+
 func main() {
 	var cfg Config
 	if err := env.Parse(&cfg); err != nil {
@@ -33,7 +50,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	level, err := slogLevel(cfg.LogLevel)
+	if err != nil {
+		fmt.Printf("invalid LOG_LEVEL: %v\n", err)
+		os.Exit(1)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
 	// secret.Enabled() only reports true while Do is on the call stack, so it
 	// must be probed from inside Do. A direct call from main always returns
