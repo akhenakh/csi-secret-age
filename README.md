@@ -14,6 +14,7 @@ No external databases or heavy Vault installations are required.
 * **Modern Cryptography:** Powered by the modern, secure `filippo.io/age` encryption standard.
 * **Cloud KMS Ready:** Extensible `MasterKeyProvider` interface allows fetching the master unlock key from AWS KMS, GCP KMS, or Azure KeyVault.
 * **Memory Safe:** Built using Go 1.24+ `runtime/secret` experiment. All decryption, JSON parsing, and string manipulation happen inside a secure execution enclave. Plaintext secrets are strictly zeroed out from heap memory when no longer needed.
+* **Reload Configuration:"** Watch for permissions file changes and reload without a need to restart the applications.
 
 
 
@@ -91,6 +92,8 @@ All sensitive configuration values support a `_FILE` suffix to read from a file 
 | `JWT_JWKS_URL` | — | URL returning a JWKS JSON document |
 | `JWT_JWKS` | `JWT_JWKS_FILE` | Inline or file-based JWKS JSON document |
 | `JWT_JWKS_REFRESH_INTERVAL` | — | JWKS URL cache TTL (default `15m`) |
+| `JWT_AUDIENCE` | — | Expected `aud` claim, e.g. your OAuth client_id |
+| `JWT_ISSUER` | — | Expected `iss` claim, e.g. `https://accounts.google.com` |
 
 `JWT_PUBLIC_KEY` and the JWKS options are **mutually exclusive** — configure one or the other.
 
@@ -167,14 +170,14 @@ metadata:
 data:
   perm.yaml: |
     admin_users:
-      - userH
+      - userH@domain.com
 
     # User permissions for the Web UI
     user_permissions:
-      userA:
+      userA@domain.com:
         - "/nats/*"
         - "/postgresql/*"
-      userB:
+      userB@domain.com:
         - "/app/*"
 ```
 
@@ -183,24 +186,9 @@ Rules:
 - The `admin` list contains usernames that have full access to **all** secrets and can perform exports.
 - Only admins can click **Export Backup (.age)**.
 
-### 2. Provide the JWT public key
+The Web UI validates incoming `Authorization: Bearer <token>` headers using JWKS or a JWT public key. See `README_JWT.md`.
 
-The Web UI validates incoming `Authorization: Bearer <token>` headers using an RSA public key. Store it in a Secret:
-
-```yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: jwt-public-key
-  namespace: kube-system
-stringData:
-  JWT_PUBLIC_KEY: |
-    -----BEGIN PUBLIC KEY-----
-    MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
-    -----END PUBLIC KEY-----
-```
-
-### 3. Wire the environment variables
+### 2. Wire the environment variables
 
 The DaemonSet in `deploy.yaml` already includes the volume mounts and env vars. You can provide secrets inline via environment variables or from mounted files using the `_FILE` suffix (file takes precedence when both are set):
 
@@ -222,6 +210,11 @@ env:
   #   value: "https://auth.example.com/.well-known/jwks.json"
   - name: JWT_USER_CLAIM
     value: "sub"  # default; the JWT claim to use as the username
+  # For SSO (e.g. Google), also verify aud/iss so tokens for other apps are rejected.
+  # - name: JWT_AUDIENCE
+  #   value: "387398432539-xxx.apps.googleusercontent.com"
+  # - name: JWT_ISSUER
+  #   value: "https://accounts.google.com"
 ```
 
 `JWT_PUBLIC_KEY`/`JWT_PUBLIC_KEY_FILE` and the JWKS options (`JWT_JWKS_URL`,
@@ -229,12 +222,15 @@ env:
 must include a `kid` header so the provider can select the correct signing
 key.
 
+When `JWT_AUDIENCE` is set, every token must contain that audience (`aud`)
+claim. When `JWT_ISSUER` is set, every token must come from that issuer
+(`iss`). This is essential for SSO: without it, a valid token signed by the
+same provider but intended for a different client could be accepted.
+
 When these are set, every request to the Web UI must include a valid `Authorization: Bearer <jwt>` token. The UI will then only show folders and secrets the user is allowed to read.
 
 > **Tip:** In `DEV_MODE=true`, the permission system is **not** enforced. The Web UI remains open so you can develop and test without generating JWTs.
 
-
----
 
 ## Securing the Admin UI
 
@@ -276,18 +272,16 @@ Then use an ingress or gateway (e.g., NGINX Ingress, Istio, Ambassador, Traefik)
 
 When `PERM_CONFIG_PATH` and `JWT_PUBLIC_KEY` are configured, the UI's built-in JWT middleware enforces access control. When they are **not** set, the UI is completely open — anyone with network access to port 8090 can read, write, and delete secrets, and can attempt to unlock the vault. Always configure JWT authentication in production, even behind a reverse proxy.
 
----
 
 ## Managing Secrets (Web UI)
 
-Once unlocked, the Web UI at http://localhost:8090 becomes your control plane.
+Once unlocked, the Web UI becomes your control plane.
 
 * **View the tree:** Browse the folder-based hierarchy and click on entries to see their vault path.
 * **Blind-Write Interface:** For security, secret values cannot be read back from the UI. They are displayed as `********`.
 * **Add/Update Secrets:** Use the form to insert new secrets or update existing ones. Example path: `/db/postgres/password`.
 * **Offline Backups:** Admins can click **Export Backup (.age)** to download the entire vault securely. Because the export is `age`-encrypted, it is completely safe to store in version control, S3, or a local hard drive.
 
----
 
 ## Usage: Mounting Secrets in Pods
 
@@ -376,8 +370,6 @@ SKIP_TEARDOWN=true go test -tags e2e ./e2e -run TestE2E -count=1 -v
 CONTAINER_RUNTIME=podman go test -tags e2e ./e2e -run TestE2E -count=1 -v
 ```
 
----
-
 ## Advanced Security: Hardware Memory Wiping
 
 This project takes advantage of the experimental `runtime/secret` package introduced in Go.
@@ -445,4 +437,3 @@ flowchart TB
 - [] read sub from header if the gw is doing the auth (less safe)
 - tls
 - env export
-- reload perm on the fly

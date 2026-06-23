@@ -946,6 +946,75 @@ func TestPermissionManager_ValidateJWT_JWKSURL(t *testing.T) {
 	assert.Equal(t, requestsBefore+2, requests, "expected a refetch per validation with zero TTL")
 }
 
+func TestPermissionManager_ValidateJWT_AudienceIssuer(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - alice\n"), 0644))
+
+	pm, err := NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{
+		PublicKeyPEM: string(pubKeyPEM),
+		Audience:     "387398432539-xxx.apps.googleusercontent.com",
+		Issuer:       "https://accounts.google.com",
+	}, "sub")
+	require.NoError(t, err)
+
+	makeToken := func(aud, iss string) string {
+		claims := jwt.MapClaims{
+			"sub": "alice",
+			"exp": time.Now().Add(time.Hour).Unix(),
+		}
+		if aud != "" {
+			claims["aud"] = aud
+		}
+		if iss != "" {
+			claims["iss"] = iss
+		}
+		token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+		signed, err := token.SignedString(privateKey)
+		require.NoError(t, err)
+		return signed
+	}
+
+	// Valid Google-style token.
+	valid := makeToken("387398432539-xxx.apps.googleusercontent.com", "https://accounts.google.com")
+	username, err := pm.ValidateJWT(valid)
+	require.NoError(t, err)
+	assert.Equal(t, "alice", username)
+
+	// Wrong audience.
+	_, err = pm.ValidateJWT(makeToken("other-client-id", "https://accounts.google.com"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid audience")
+
+	// Wrong issuer.
+	_, err = pm.ValidateJWT(makeToken("387398432539-xxx.apps.googleusercontent.com", "https://malicious.example.com"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid issuer")
+
+	// Missing audience/issuer.
+	_, err = pm.ValidateJWT(makeToken("", ""))
+	require.Error(t, err)
+
+	// Audience as an array containing the expected value should be accepted.
+	arrAudToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub": "alice",
+		"aud": []string{"other-client-id", "387398432539-xxx.apps.googleusercontent.com"},
+		"iss": "https://accounts.google.com",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	arrAudTokenString, err := arrAudToken.SignedString(privateKey)
+	require.NoError(t, err)
+	username, err = pm.ValidateJWT(arrAudTokenString)
+	require.NoError(t, err)
+	assert.Equal(t, "alice", username)
+}
+
 func TestPermissionManager_JWTKeyConfigConflicts(t *testing.T) {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)

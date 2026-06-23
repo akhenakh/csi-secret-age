@@ -27,6 +27,8 @@ type PermissionManager struct {
 	configPath string
 	keyfunc    jwt.Keyfunc
 	userClaim  string
+	audience   string
+	issuer     string
 
 	mu                   sync.RWMutex
 	permissions          map[string][]string
@@ -41,6 +43,8 @@ type JWTKeyConfig struct {
 	JWKSURL         string
 	JWKSJSON        string
 	RefreshInterval time.Duration
+	Audience        string
+	Issuer          string
 }
 
 // UserPermissions holds the resolved permissions for a single user.
@@ -76,6 +80,8 @@ func NewPermissionManagerWithJWTConfig(configPath string, cfg JWTKeyConfig, user
 		configPath: configPath,
 		keyfunc:    keyfunc,
 		userClaim:  userClaim,
+		audience:   cfg.Audience,
+		issuer:     cfg.Issuer,
 	}
 
 	if err := pm.Load(); err != nil {
@@ -467,12 +473,53 @@ func (pm *PermissionManager) ValidateJWT(tokenString string) (string, error) {
 		return "", errors.New("invalid claims")
 	}
 
+	if pm.audience != "" && !audienceMatches(claims, pm.audience) {
+		return "", fmt.Errorf("invalid audience; expected %s", pm.audience)
+	}
+	if pm.issuer != "" && !issuerMatches(claims, pm.issuer) {
+		return "", fmt.Errorf("invalid issuer; expected %s", pm.issuer)
+	}
+
 	username, ok := claims[pm.userClaim].(string)
 	if !ok || username == "" {
 		return "", fmt.Errorf("claim %s not found or empty", pm.userClaim)
 	}
 
 	return username, nil
+}
+
+func audienceMatches(claims jwt.MapClaims, expected string) bool {
+	raw, ok := claims["aud"]
+	if !ok {
+		return false
+	}
+	switch v := raw.(type) {
+	case string:
+		return v == expected
+	case []string:
+		for _, s := range v {
+			if s == expected {
+				return true
+			}
+		}
+		return false
+	case []interface{}:
+		for _, s := range v {
+			if str, ok := s.(string); ok && str == expected {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+func issuerMatches(claims jwt.MapClaims, expected string) bool {
+	raw, ok := claims["iss"].(string)
+	if !ok {
+		return false
+	}
+	return raw == expected
 }
 
 func (pm *PermissionManager) GetUserPermissions(username string) *UserPermissions {

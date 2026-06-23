@@ -1,61 +1,17 @@
-csi-secret-age supports two configurations to validate users authentication, JWKS or against a public JWT key.
+# JWT Authentication for the Web UI
 
+The Web UI validates incoming `Authorization: Bearer <token>` headers. Tokens must be **RS256-signed RSA JWTs**. The provider supports two ways to obtain the validation key:
 
-# JWKS Configuration
+- A static PEM-encoded RSA public key (`JWT_PUBLIC_KEY` / `JWT_PUBLIC_KEY_FILE`).
+- A JSON Web Key Set (`JWT_JWKS_URL`, or `JWT_JWKS` / `JWT_JWKS_FILE`).
 
-If your identity provider rotates signing keys, configure a JSON Web Key Set
-(JWKS) instead of a static public key. The provider fetches the key set,
-caches it, and selects the correct RSA key using the token's `kid` header.
+These two approaches are **mutually exclusive** — configure one or the other.
 
-Set **exactly one** of the following (mutually exclusive with
-`JWT_PUBLIC_KEY`/`JWT_PUBLIC_KEY_FILE`):
+---
 
-| Environment Variable | File Variant | Purpose |
-|---|---|---|
-| `JWT_JWKS_URL` | — | URL returning JWKS JSON |
-| `JWT_JWKS` | `JWT_JWKS_FILE` | Inline or file-based JWKS JSON |
+## Static Public Key
 
-Use `JWT_JWKS_REFRESH_INTERVAL` to control the cache TTL (default `15m`; set to
-`0` to fetch on every validation).
-
-Example using a JWKS URL:
-
-```yaml
-env:
-  - name: JWT_JWKS_URL
-    value: "https://auth.example.com/.well-known/jwks.json"
-  - name: JWT_JWKS_REFRESH_INTERVAL
-    value: "15m"
-  - name: JWT_USER_CLAIM
-    value: "sub"
-```
-
-Tokens validated via JWKS **must include a `kid` header**.
-
-## 4. Use the Token
-
-Include the signed JWT as a Bearer token in requests to the Web UI:
-
-```bash
-curl -H "Authorization: Bearer $(cat /tmp/admin.jwt)" http://localhost:8090/entry?path=/db/postgres/password
-```
-
-## Key Requirements Summary
-
-| Requirement | Value |
-|-------------|-------|
-| Key algorithm | RSA, 2048-bit minimum |
-| Signing algorithm | RS256 (SHA-256) |
-| Public key format | PEM-encoded PKIX (`-----BEGIN PUBLIC KEY-----`) or JWKS RSA keys |
-| JWT claim for username | `sub` (configurable via `JWT_USER_CLAIM`) |
-| JWKS token requirement | Token header must include `kid` |
-| JWKS cache TTL | `JWT_JWKS_REFRESH_INTERVAL` (default `15m`) |
-
-# JWT Key Generation for the Web UI
-
-The Web UI uses RSA-signed JWTs (RS256) for authentication. You need an RSA key pair — a private key for signing tokens and a public key to give the CSI provider for validation.
-
-## 1. Generate an RSA Key Pair
+### 1. Generate an RSA Key Pair
 
 ```bash
 # Generate a 2048-bit RSA private key
@@ -73,7 +29,7 @@ MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA...
 -----END PUBLIC KEY-----
 ```
 
-## 2. Sign a JWT Token
+### 2. Sign a JWT Token
 
 Here's a minimal Go example that creates a JWT for user `alice`:
 
@@ -103,9 +59,12 @@ func main() {
 
 	// Create a token with claims
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"sub":  "alice",                                 // username (matches perm.yaml entry)
-		"iat":  time.Now().Unix(),                        // issued at
-		"exp":  time.Now().Add(24 * time.Hour).Unix(),    // expires in 24h
+		"sub":  "alice",                                // username (matches perm.yaml entry)
+		"iat":  time.Now().Unix(),                      // issued at
+		"exp":  time.Now().Add(24 * time.Hour).Unix(),  // expires in 24h
+		// Optional, but required when JWT_AUDIENCE / JWT_ISSUER are configured:
+		// "aud":  "387398432539-xxx.apps.googleusercontent.com",
+		// "iss":  "https://accounts.google.com",
 	})
 
 	// Sign it
@@ -137,7 +96,7 @@ SIGNATURE=$(echo -n "$HEADER.$PAYLOAD" | openssl dgst -sha256 -sign jwt-private.
 echo "$HEADER.$PAYLOAD.$SIGNATURE"
 ```
 
-## 3. Provide the Public Key to the Provider
+### 3. Provide the Public Key to the Provider
 
 Store the public key in a Kubernetes Secret and reference it in the DaemonSet:
 
@@ -155,9 +114,9 @@ stringData:
     -----END PUBLIC KEY-----
 ```
 
-This matches the DaemonSet mount — the Secret is mounted at `/etc/csi-secret-age/secrets/jwt/`, so each key becomes a file (e.g. `jwt-public-key.pem`). The env var `JWT_PUBLIC_KEY_FILE` then points to the full path:
+This matches the DaemonSet mount — the Secret is mounted at `/etc/csi-secret-age/secrets/jwt/`, so each key becomes a file (e.g. `jwt-public-key.pem`). The env var `JWT_PUBLIC_KEY_FILE` then points to the full path.
 
-Then wire it via env in `deploy.yaml`:
+Wire it via env in `deploy.yaml`:
 
 ```yaml
 env:
@@ -167,3 +126,83 @@ env:
     value: "sub"    # default; the JWT claim used as the username
 ```
 
+---
+
+## JWKS Configuration
+
+If your identity provider rotates signing keys, configure a JSON Web Key Set
+(JWKS) instead of a static public key. The provider fetches the key set,
+caches it, and selects the correct RSA key using the token's `kid` header.
+
+Set **exactly one** of the following:
+
+| Environment Variable | File Variant | Purpose |
+|---|---|---|
+| `JWT_JWKS_URL` | — | URL returning JWKS JSON |
+| `JWT_JWKS` | `JWT_JWKS_FILE` | Inline or file-based JWKS JSON |
+
+Use `JWT_JWKS_REFRESH_INTERVAL` to control the cache TTL (default `15m`; set to
+`0` to fetch on every validation).
+
+Example using a JWKS URL:
+
+```yaml
+env:
+  - name: JWT_JWKS_URL
+    value: "https://auth.example.com/.well-known/jwks.json"
+  - name: JWT_JWKS_REFRESH_INTERVAL
+    value: "15m"
+  - name: JWT_USER_CLAIM
+    value: "sub"
+```
+
+Tokens validated via JWKS **must include a `kid` header**.
+
+---
+
+## SSO: Audience & Issuer Validation
+
+When using an external identity provider such as Google, validating the
+signature is not enough. You must also verify that the token was issued for
+your application by checking the **`aud`** claim (your OAuth `client_id`) and,
+optionally, the **`iss`** claim.
+
+Set `JWT_AUDIENCE` to your client ID and `JWT_ISSUER` to the expected issuer:
+
+```yaml
+env:
+  - name: JWT_JWKS_URL
+    value: "https://www.googleapis.com/oauth2/v3/certs"
+  - name: JWT_AUDIENCE
+    value: "387398432539-xxx.apps.googleusercontent.com"
+  - name: JWT_ISSUER
+    value: "https://accounts.google.com"
+  - name: JWT_USER_CLAIM
+    value: "email"
+```
+
+Tokens that do not match the configured audience or issuer will be rejected
+with a 401 Unauthorized response.
+
+---
+
+## Using the Token
+
+Include the signed JWT as a Bearer token in requests to the Web UI:
+
+```bash
+curl -H "Authorization: Bearer $(cat /tmp/admin.jwt)" http://localhost:8090/entry?path=/db/postgres/password
+```
+
+## Key Requirements Summary
+
+| Requirement | Value |
+|-------------|-------|
+| Key algorithm | RSA, 2048-bit minimum |
+| Signing algorithm | RS256 (SHA-256) |
+| Public key format | PEM-encoded PKIX (`-----BEGIN PUBLIC KEY-----`) or JWKS RSA keys |
+| JWT claim for username | `sub` (configurable via `JWT_USER_CLAIM`) |
+| JWKS token requirement | Token header must include `kid` |
+| JWKS cache TTL | `JWT_JWKS_REFRESH_INTERVAL` (default `15m`) |
+| Audience validation | `JWT_AUDIENCE` (e.g. your OAuth `client_id`) |
+| Issuer validation | `JWT_ISSUER` (e.g. `https://accounts.google.com`) |

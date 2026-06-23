@@ -33,6 +33,13 @@ type Config struct {
 	JWTPublicKey     string `env:"JWT_PUBLIC_KEY"`
 	JWTPublicKeyFile string `env:"JWT_PUBLIC_KEY_FILE"`
 	JWTUserClaim     string `env:"JWT_USER_CLAIM" envDefault:"sub"`
+	// JWTAudience is the expected audience (aud) claim of incoming JWTs.
+	// For Google SSO this is your OAuth client_id. When set, every token must
+	// contain this audience or it will be rejected.
+	JWTAudience string `env:"JWT_AUDIENCE"`
+	// JWTIssuer is the expected issuer (iss) claim of incoming JWTs.
+	// For Google SSO this is typically "https://accounts.google.com".
+	JWTIssuer string `env:"JWT_ISSUER"`
 
 	// JWT_JWKS_URL fetches a JSON Web Key Set from an HTTPS (or HTTP) URL.
 	// The key identified by the token's `kid` header is used for RS256 validation.

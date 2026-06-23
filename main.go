@@ -88,6 +88,8 @@ func main() {
 			JWKSURL:         cfg.JWTJWKSURL,
 			JWKSJSON:        cfg.JWTJWKS,
 			RefreshInterval: cfg.JWTJWKSRefreshInterval,
+			Audience:        cfg.JWTAudience,
+			Issuer:          cfg.JWTIssuer,
 		}, cfg.JWTUserClaim)
 		if errPerm != nil {
 			logger.Error("Failed to load permissions", "error", errPerm)
