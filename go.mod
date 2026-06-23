@@ -5,6 +5,7 @@ go 1.26.3
 require (
 	filippo.io/age v1.3.1
 	github.com/caarlos0/env/v11 v11.4.1
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/stretchr/testify v1.11.1
 	golang.org/x/sync v0.21.0

@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	stdlibruntime "runtime"
 	"testing"
 	"time"
 
@@ -440,6 +441,135 @@ user_permissions:
 	unknown := pm.GetUserPermissions("unknown")
 	require.NotNil(t, unknown)
 	assert.False(t, unknown.CanRead("/nats/secret"))
+}
+
+func TestPermissionManager_Watch(t *testing.T) {
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	content := `
+admin_users:
+  - userH
+user_permissions:
+  userA:
+    - "/nats/*"
+`
+	require.NoError(t, os.WriteFile(permPath, []byte(content), 0644))
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	assert.True(t, pm.GetUserPermissions("userA").CanRead("/nats/secret"))
+	assert.False(t, pm.GetUserPermissions("userB").CanRead("/app/key"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- pm.Watch(ctx, getTestLogger())
+	}()
+
+	// Give the watcher time to initialize before modifying the file.
+	time.Sleep(100 * time.Millisecond)
+
+	updated := `
+admin_users:
+  - userH
+user_permissions:
+  userB:
+    - "/app/*"
+`
+	require.NoError(t, os.WriteFile(permPath, []byte(updated), 0644))
+
+	require.Eventually(t, func() bool {
+		return pm.GetUserPermissions("userB").CanRead("/app/key")
+	}, 2*time.Second, 50*time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch did not return after context cancellation")
+	}
+}
+
+func TestPermissionManager_Watch_KubernetesConfigMapSymlink(t *testing.T) {
+	if stdlibruntime.GOOS != "linux" {
+		t.Skip("Kubernetes ConfigMap inotify behaviour is Linux-specific")
+	}
+
+	tmpDir := t.TempDir()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	// Simulate Kubernetes AtomicWriter layout:
+	//   perm.yaml -> ..data/perm.yaml
+	//   ..data -> ..2022_..._v1/
+	//   ..2022_..._v1/perm.yaml (real file)
+	v1Dir := filepath.Join(tmpDir, "..2022_09_22_15_29_04.2914482033")
+	require.NoError(t, os.Mkdir(v1Dir, 0755))
+	v1Content := `
+user_permissions:
+  userA:
+    - "/nats/*"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(v1Dir, "perm.yaml"), []byte(v1Content), 0644))
+	require.NoError(t, os.Symlink(filepath.Base(v1Dir), filepath.Join(tmpDir, "..data")))
+	require.NoError(t, os.Symlink(filepath.Join("..data", "perm.yaml"), filepath.Join(tmpDir, "perm.yaml")))
+
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	assert.True(t, pm.GetUserPermissions("userA").CanRead("/nats/secret"))
+	assert.False(t, pm.GetUserPermissions("userB").CanRead("/app/key"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- pm.Watch(ctx, getTestLogger())
+	}()
+
+	// Give the watcher time to initialize before modifying the file.
+	time.Sleep(100 * time.Millisecond)
+
+	// Simulate a ConfigMap update: create a new timestamped directory, repoint
+	// the ..data symlink, then remove the old timestamped directory.
+	v2Dir := filepath.Join(tmpDir, "..2022_09_22_15_29_05.1234567890")
+	require.NoError(t, os.Mkdir(v2Dir, 0755))
+	v2Content := `
+user_permissions:
+  userB:
+    - "/app/*"
+`
+	require.NoError(t, os.WriteFile(filepath.Join(v2Dir, "perm.yaml"), []byte(v2Content), 0644))
+	require.NoError(t, os.Remove(filepath.Join(tmpDir, "..data")))
+	require.NoError(t, os.Symlink(filepath.Base(v2Dir), filepath.Join(tmpDir, "..data")))
+	require.NoError(t, os.RemoveAll(v1Dir))
+
+	require.Eventually(t, func() bool {
+		return pm.GetUserPermissions("userB").CanRead("/app/key")
+	}, 2*time.Second, 50*time.Millisecond)
+
+	cancel()
+	select {
+	case err := <-errCh:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("watch did not return after context cancellation")
+	}
 }
 
 func TestPermissionManager_CanAccess(t *testing.T) {

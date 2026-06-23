@@ -107,6 +107,13 @@ func main() {
 
 	g, ctx := errgroup.WithContext(ctx)
 
+	// 0. Permissions file watcher
+	if permMgr != nil {
+		g.Go(func() error {
+			return permMgr.Watch(ctx, logger)
+		})
+	}
+
 	// 1. gRPC CSI Server
 	g.Go(func() error {
 		if err := os.Remove(cfg.SocketPath); err != nil && !os.IsNotExist(err) {

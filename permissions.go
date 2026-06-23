@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"os"
@@ -16,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/golang-jwt/jwt/v5"
 	"gopkg.in/yaml.v3"
 )
@@ -361,6 +364,93 @@ func (pm *PermissionManager) Load() error {
 	}
 
 	return nil
+}
+
+// Watch observes the permissions file using fsnotify (inotify on Linux) and
+// reloads the configuration whenever it changes. It runs until the provided
+// context is cancelled. Errors during reload are logged but do not stop the
+// watcher.
+//
+// The watch is placed on the configured file path itself. This correctly
+// handles both regular filesystem edits and Kubernetes ConfigMap/Secret
+// volumes, where kubelet updates files by swapping the symlink target behind
+// the user-visible file. In the Kubernetes case the old file is deleted,
+// producing a Remove event, so the watch is re-established on the new target
+// before reloading.
+func (pm *PermissionManager) Watch(ctx context.Context, logger *slog.Logger) error {
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("failed to create fsnotify watcher: %w", err)
+	}
+	defer watcher.Close()
+
+	addWatch := func() error {
+		if err := watcher.Add(pm.configPath); err != nil {
+			return fmt.Errorf("failed to watch permissions file %q: %w", pm.configPath, err)
+		}
+		return nil
+	}
+
+	if err := addWatch(); err != nil {
+		return err
+	}
+
+	logger.Info("Watching permissions file for changes", "path", pm.configPath)
+
+	const debounce = 100 * time.Millisecond
+	reloadTimer := time.NewTimer(0)
+	<-reloadTimer.C
+	defer reloadTimer.Stop()
+
+	resetReloadTimer := func() {
+		if !reloadTimer.Stop() {
+			select {
+			case <-reloadTimer.C:
+			default:
+			}
+		}
+		reloadTimer.Reset(debounce)
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case event, ok := <-watcher.Events:
+			if !ok {
+				return errors.New("permissions watcher event channel closed")
+			}
+			// Kubernetes ConfigMap/Secret volumes update a file by replacing the
+			// real file behind a symlink, which surfaces as a Remove (or Rename)
+			// event on the watched path. The inotify watch is tied to the old
+			// inode, so it must be re-established on the new file before we can
+			// keep watching.
+			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
+				_ = watcher.Remove(pm.configPath)
+				if err := addWatch(); err != nil {
+					logger.Error("Failed to re-establish permissions watch", "error", err)
+					continue
+				}
+				resetReloadTimer()
+				continue
+			}
+			if !event.Has(fsnotify.Write) && !event.Has(fsnotify.Create) && !event.Has(fsnotify.Chmod) {
+				continue
+			}
+			resetReloadTimer()
+		case err, ok := <-watcher.Errors:
+			if !ok {
+				return errors.New("permissions watcher error channel closed")
+			}
+			logger.Error("Permissions watcher error", "error", err)
+		case <-reloadTimer.C:
+			if err := pm.Load(); err != nil {
+				logger.Error("Failed to reload permissions", "error", err)
+			} else {
+				logger.Info("Permissions reloaded", "path", pm.configPath)
+			}
+		}
+	}
 }
 
 func (pm *PermissionManager) ValidateJWT(tokenString string) (string, error) {
