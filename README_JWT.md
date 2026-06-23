@@ -209,6 +209,8 @@ When `JWT_USER_HEADER` is set:
 2. Otherwise, the value of `JWT_USER_HEADER` is read as the authenticated username and looked up in the permissions file.
 3. If `JWT_ADMIN_HEADER` and `JWT_ADMIN_VALUE` are also set and the header matches, the user is treated as an admin regardless of the permissions file.
 
+You do **not** need to configure `JWT_PUBLIC_KEY` or a JWKS if you only use header-based authentication. If you configure both, JWT is preferred and the header is a fallback.
+
 **Important security note:** the proxy must strip or overwrite these headers for untrusted traffic. Anyone able to send requests directly to `csi-secret-age` with the configured header can impersonate a user.
 
 ## Using the Token

@@ -122,7 +122,9 @@ func buildJWTKeyfunc(cfg JWTKeyConfig) (jwt.Keyfunc, error) {
 		sourcesSet++
 	}
 	if sourcesSet == 0 {
-		return nil, errors.New("JWT public key or JWKS configuration is required")
+		// No JWT key source is configured. This is allowed when authentication
+		// is handled by a trusted upstream proxy via header-based auth.
+		return nil, nil
 	}
 	if sourcesSet > 1 {
 		return nil, errors.New("only one JWT key source may be configured: JWT_PUBLIC_KEY, JWT_JWKS_URL, or JWT_JWKS/JWT_JWKS_FILE")
@@ -460,6 +462,9 @@ func (pm *PermissionManager) Watch(ctx context.Context, logger *slog.Logger) err
 }
 
 func (pm *PermissionManager) ValidateJWT(tokenString string) (string, error) {
+	if pm.keyfunc == nil {
+		return "", errors.New("JWT validation is not configured")
+	}
 	token, err := jwt.Parse(tokenString, pm.keyfunc)
 	if err != nil {
 		return "", err

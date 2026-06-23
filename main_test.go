@@ -407,8 +407,13 @@ user_permissions:
 `
 	require.NoError(t, os.WriteFile(permPath, []byte(content), 0644))
 
+	// No JWT key source is required when header-based auth is used.
 	pm, err := NewPermissionManager(permPath, "", "sub")
-	require.Error(t, err) // public key is required
+	require.NoError(t, err)
+
+	_, err = pm.ValidateJWT("any-token")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "JWT validation is not configured")
 
 	// Generate a throwaway RSA key for the test
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -1040,9 +1045,13 @@ func TestPermissionManager_JWTKeyConfigConflicts(t *testing.T) {
 	}, "sub")
 	require.Error(t, err)
 
-	_, err = NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{}, "sub")
+	// Empty JWT key config is allowed when authentication is handled by a
+	// trusted upstream proxy via header-based auth.
+	pmHeader, err := NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{}, "sub")
+	require.NoError(t, err)
+	_, err = pmHeader.ValidateJWT("any-token")
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "JWT public key or JWKS configuration is required")
+	assert.Contains(t, err.Error(), "JWT validation is not configured")
 }
 
 // buildBenchmarkTree creates a tree with n nodes, each node is a leaf with a 64-byte secret.
