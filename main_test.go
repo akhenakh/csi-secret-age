@@ -313,6 +313,47 @@ func TestVaultManager_LockedState(t *testing.T) {
 	require.NotNil(t, tree)
 }
 
+// TestUnlockWithKeygenFileFormat is a regression test for the case where the
+// master key is provided as a full age-keygen file (with "# created" /
+// "# public key" comment headers) rather than a bare AGE-SECRET-KEY-1 line.
+// KMS and file-backed providers commonly return this format; Unlock must
+// tolerate it instead of failing with "malformed secret key".
+func TestUnlockWithKeygenFileFormat(t *testing.T) {
+	ctx := context.Background()
+	fakeClient := fake.NewSimpleClientset()
+	cfg := Config{
+		VaultSecretName: "test-vault",
+		VaultNamespace:  "kube-system",
+	}
+
+	identity, err := age.GenerateX25519Identity()
+	require.NoError(t, err)
+
+	// Reproduce the exact format emitted by `age-keygen`.
+	keygenFile := fmt.Sprintf(
+		"# created: 2026-06-22T16:08:32-04:00\n# public key: %s\n%s\n",
+		identity.Recipient().String(),
+		identity.String(),
+	)
+
+	mgr := NewVaultManager(cfg, fakeClient, nil)
+	require.True(t, mgr.IsLocked())
+
+	err = mgr.Unlock(keygenFile)
+	require.NoError(t, err, "Unlock must accept a full age-keygen file")
+	require.False(t, mgr.IsLocked())
+
+	// Prove the parsed identity is the correct one by round-tripping the vault.
+	tree := &VaultTree{Nodes: map[string]*VaultNode{
+		"/secret": {Value: "shhh"},
+	}}
+	require.NoError(t, mgr.EncryptAndSave(ctx, tree))
+
+	loaded, err := mgr.LoadAndDecrypt(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "shhh", loaded.Nodes["/secret"].Value)
+}
+
 func TestCheckPathConflict(t *testing.T) {
 	tests := []struct {
 		name      string

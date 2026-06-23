@@ -99,9 +99,24 @@ func (m *VaultManager) Unlock(masterKey string) error {
 	var parseErr error
 	var identity *age.X25519Identity
 
-	// Protect parsing inside secret.Do so temporary strings are zeroed
+	// Protect parsing inside secret.Do so temporary strings are zeroed.
+	// ParseIdentities (rather than ParseX25519Identity) is used so the key may
+	// be supplied either as a bare AGE-SECRET-KEY-1... line or as a full
+	// age-keygen file, which carries "# created" / "# public key" comment
+	// headers. KMS/file-backed providers commonly return the latter.
 	secret.Do(func() {
-		identity, parseErr = age.ParseX25519Identity(strings.TrimSpace(masterKey))
+		ids, err := age.ParseIdentities(strings.NewReader(masterKey))
+		if err != nil {
+			parseErr = err
+			return
+		}
+		for _, id := range ids {
+			if x, ok := id.(*age.X25519Identity); ok {
+				identity = x
+				return
+			}
+		}
+		parseErr = errors.New("no X25519 identity found in master key")
 	})
 
 	if parseErr != nil {
