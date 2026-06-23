@@ -52,6 +52,8 @@ Verify the daemonset is running:
 kubectl get pods -n kube-system -l app=csi-secret-age
 ```
 
+> **Image build note:** A `Dockerfile` is included in the repository for external users who want to build the image themselves. The project's own images are built and published using [`ko`](https://github.com/ko-build/ko) with `.ko.yaml`.
+
 > **Note on Multiple Replicas:** The DaemonSet can safely run multiple provider pods per node. All instances share the same encrypted Kubernetes Secret backend. The built-in optimistic locking (`ResourceVersion` retries) ensures that concurrent writes from different pods (or concurrent UI sessions) never overwrite each other.
 
 ### 3. Unlock the Vault via Web UI
@@ -94,7 +96,6 @@ All sensitive configuration values support a `_FILE` suffix to read from a file 
 | `JWT_JWKS_REFRESH_INTERVAL` | — | JWKS URL cache TTL (default `15m`) |
 | `JWT_AUDIENCE` | — | Expected `aud` claim, e.g. your OAuth client_id |
 | `JWT_ISSUER` | — | Expected `iss` claim, e.g. `https://accounts.google.com` |
-
 `JWT_PUBLIC_KEY` and the JWKS options are **mutually exclusive** — configure one or the other.
 
 When both the inline and file variants are set, the **file takes precedence**. File contents are trimmed of leading/trailing whitespace.

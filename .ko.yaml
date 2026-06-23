@@ -1,0 +1,20 @@
+# .ko.yaml
+defaultBaseImage: gcr.io/distroless/static-debian12
+defaultPlatforms:
+  - linux/amd64
+  - linux/arm64
+
+builds:
+- id: csi-secret-age
+  dir: .
+  main: .
+  env:
+  - CGO_ENABLED=0
+  - GOEXPERIMENT=runtimesecret
+  ldflags:
+  - -s
+  - -w
+# ko supports templating for build tags based on environment variables
+  flags:
+  - -tags={{if .Env.KMS_ENABLED}}kms{{end}}{{if .Env.GCPKMS_ENABLED}}{{if .Env.KMS_ENABLED}},{{end}}gcpkms{{end}}
+
