@@ -1316,3 +1316,135 @@ func TestConfig_ResolveSecrets(t *testing.T) {
 	}
 	require.Error(t, cfg3.ResolveSecrets())
 }
+
+func TestWithAuth_JWTUserHeader(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - header-admin\nuser_permissions:\n  header-user:\n    - /secrets/*\n"), 0644))
+
+	pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	var seenUser string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := getUserPerms(r)
+		require.NotNil(t, up)
+		seenUser = up.username
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "", "")
+
+	// Header auth succeeds for a regular user.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-User", "header-user")
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "header-user", seenUser)
+
+	// Header auth succeeds for an admin listed in the permissions file.
+	seenUser = ""
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-User", "header-admin")
+	rec = httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "header-admin", seenUser)
+
+	// Missing header returns 401.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	rec = httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestWithAuth_HeaderAdminOverride(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("user_permissions:\n  plain-user:\n    - /secrets/*\n"), 0644))
+
+	pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	var seenAdmin bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := getUserPerms(r)
+		require.NotNil(t, up)
+		seenAdmin = up.isAdmin
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "X-Admin", "true")
+
+	// Admin header marks a non-admin user as admin.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-User", "plain-user")
+	req.Header.Set("X-Admin", "true")
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, seenAdmin)
+
+	// Mismatched admin header keeps regular permissions.
+	req = httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-User", "plain-user")
+	req.Header.Set("X-Admin", "false")
+	rec = httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.False(t, seenAdmin)
+}
+
+func TestWithAuth_JWTTakesPrecedenceOverHeader(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - jwt-user\n"), 0644))
+
+	pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub": "jwt-user",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	tokenString, err := token.SignedString(privateKey)
+	require.NoError(t, err)
+
+	var seenUser string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		up := getUserPerms(r)
+		require.NotNil(t, up)
+		seenUser = up.username
+		w.WriteHeader(http.StatusOK)
+	})
+
+	wrapped := withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "", "")
+
+	// Both headers present; JWT wins.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+tokenString)
+	req.Header.Set("X-Forwarded-User", "header-user")
+	rec := httptest.NewRecorder()
+	wrapped.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "jwt-user", seenUser)
+}

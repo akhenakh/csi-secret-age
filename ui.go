@@ -28,41 +28,62 @@ func getUserPerms(r *http.Request) *UserPermissions {
 	return nil
 }
 
-func withAuth(handler http.Handler, permMgr *PermissionManager, logger *slog.Logger) http.Handler {
+func withAuth(handler http.Handler, permMgr *PermissionManager, logger *slog.Logger, userHeader, adminHeader, adminValue string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if permMgr == nil {
 			logger.Debug("auth disabled: no permission manager configured")
 			handler.ServeHTTP(w, r)
 			return
 		}
-		authHeader := r.Header.Get("Authorization")
-		if !strings.HasPrefix(authHeader, "Bearer ") {
-			logger.Debug("JWT auth failed: missing or malformed Authorization header",
-				"path", r.URL.Path,
-				"remote_addr", r.RemoteAddr,
-			)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		token := strings.TrimPrefix(authHeader, "Bearer ")
-		username, err := permMgr.ValidateJWT(token)
-		if err != nil {
+
+		// Prefer a cryptographically verifiable JWT if one is provided.
+		if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+			token := strings.TrimPrefix(authHeader, "Bearer ")
+			username, err := permMgr.ValidateJWT(token)
+			if err == nil {
+				userPerms := permMgr.GetUserPermissions(username)
+				logger.Debug("JWT auth succeeded",
+					"path", r.URL.Path,
+					"username", username,
+					"is_admin", userPerms.isAdmin,
+				)
+				ctx := context.WithValue(r.Context(), userPermsKey, userPerms)
+				handler.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
 			logger.Debug("JWT validation failed",
 				"path", r.URL.Path,
 				"remote_addr", r.RemoteAddr,
 				"error", err,
 			)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
 		}
-		userPerms := permMgr.GetUserPermissions(username)
-		logger.Debug("JWT auth succeeded",
+
+		// Fall back to a trusted proxy header when configured. This is useful
+		// when an upstream proxy (e.g. Envoy Gateway OIDC) has already
+		// authenticated the user and forwards the identity via a header.
+		if userHeader != "" {
+			username := strings.TrimSpace(r.Header.Get(userHeader))
+			if username != "" {
+				userPerms := permMgr.GetUserPermissions(username)
+				if adminHeader != "" && r.Header.Get(adminHeader) == adminValue {
+					userPerms.isAdmin = true
+				}
+				logger.Debug("header auth succeeded",
+					"path", r.URL.Path,
+					"username", username,
+					"is_admin", userPerms.isAdmin,
+				)
+				ctx := context.WithValue(r.Context(), userPermsKey, userPerms)
+				handler.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+		}
+
+		logger.Debug("auth failed: no valid JWT or trusted user header",
 			"path", r.URL.Path,
-			"username", username,
-			"is_admin", userPerms.isAdmin,
+			"remote_addr", r.RemoteAddr,
 		)
-		ctx := context.WithValue(r.Context(), userPermsKey, userPerms)
-		handler.ServeHTTP(w, r.WithContext(ctx))
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 	})
 }
 
@@ -713,7 +734,7 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      withAuth(mux, permMgr, logger),
+		Handler:      withAuth(mux, permMgr, logger, cfg.JWTUserHeader, cfg.JWTAdminHeader, cfg.JWTAdminValue),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,

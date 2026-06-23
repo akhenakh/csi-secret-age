@@ -42,6 +42,20 @@ type Config struct {
 	// For Google SSO this is typically "https://accounts.google.com".
 	JWTIssuer string `env:"JWT_ISSUER"`
 
+	// JWTUserHeader enables header-based authentication as a fallback when a
+	// valid JWT Bearer token is not present. The value of this HTTP header is
+	// treated as the authenticated username and looked up in the permissions
+	// file. This is intended for deployments where an upstream proxy (e.g.
+	// Envoy Gateway OIDC) has already authenticated the user and injects the
+	// identity via a trusted header. The proxy MUST strip or overwrite this
+	// header for untrusted requests.
+	JWTUserHeader string `env:"JWT_USER_HEADER"`
+	// JWTAdminHeader, when set with JWTAdminValue, marks the request as admin
+	// if the header value matches. If unset, admin status is resolved from the
+	// permissions file as usual.
+	JWTAdminHeader string `env:"JWT_ADMIN_HEADER"`
+	JWTAdminValue  string `env:"JWT_ADMIN_VALUE"`
+
 	// JWT_JWKS_URL fetches a JSON Web Key Set from an HTTPS (or HTTP) URL.
 	// The key identified by the token's `kid` header is used for RS256 validation.
 	// Mutually exclusive with JWT_PUBLIC_KEY / JWT_JWKS / JWT_JWKS_FILE.

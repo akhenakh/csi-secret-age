@@ -186,6 +186,31 @@ with a 401 Unauthorized response.
 
 ---
 
+## Trusted Header Authentication (OIDC Proxy Integration)
+
+Some ingress/proxy implementations — notably Envoy Gateway OIDC — authenticate the user at the proxy layer and do **not** forward a JWT to the upstream. In those cases the upstream only receives an OAuth2 access token (often opaque) or session cookies.
+
+To support this deployment model, `csi-secret-age` can fall back to a trusted HTTP header for the username when no valid JWT Bearer token is present:
+
+```yaml
+env:
+  - name: JWT_USER_HEADER
+    value: "X-Forwarded-User"
+  # Optional: force admin status based on another header value
+  - name: JWT_ADMIN_HEADER
+    value: "X-Forwarded-Groups"
+  - name: JWT_ADMIN_VALUE
+    value: "admins"
+```
+
+When `JWT_USER_HEADER` is set:
+
+1. If the request has a valid `Authorization: Bearer <jwt>` token, it is used as usual (JWT takes precedence).
+2. Otherwise, the value of `JWT_USER_HEADER` is read as the authenticated username and looked up in the permissions file.
+3. If `JWT_ADMIN_HEADER` and `JWT_ADMIN_VALUE` are also set and the header matches, the user is treated as an admin regardless of the permissions file.
+
+**Important security note:** the proxy must strip or overwrite these headers for untrusted traffic. Anyone able to send requests directly to `csi-secret-age` with the configured header can impersonate a user.
+
 ## Using the Token
 
 Include the signed JWT as a Bearer token in requests to the Web UI:

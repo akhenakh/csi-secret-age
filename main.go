@@ -118,6 +118,13 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("Permissions loaded", "path", cfg.PermConfigPath, "user_claim", cfg.JWTUserClaim)
+		if cfg.JWTUserHeader != "" {
+			logger.Warn("Header-based authentication enabled: trusting upstream proxy to set header",
+				"user_header", cfg.JWTUserHeader,
+				"admin_header", cfg.JWTAdminHeader,
+				"admin_value", cfg.JWTAdminValue,
+			)
+		}
 	}
 
 	if manager.IsLocked() {

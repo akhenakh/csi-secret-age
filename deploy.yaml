@@ -121,8 +121,8 @@ spec:
       hostNetwork: true
       containers:
         - name: csi-driver
-          image: ghcr.io/akhenakh/csi-secret-age:v0.2.1
-          # Always pull while iterating; re-pin to an immutable @sha256 digest once stable.
+          image: ghcr.io/akhenakh/csi-secret-age:latest
+          # Built with ko on every main merge. Re-pin to an immutable @sha256 digest once stable.
           imagePullPolicy: Always
           env:
             # - name: MASTER_KEY_FILE
