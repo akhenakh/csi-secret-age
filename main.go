@@ -107,7 +107,7 @@ func main() {
 		if err != nil {
 			return err
 		}
-		os.Chmod(cfg.SocketPath, 0777)
+		os.Chmod(cfg.SocketPath, 0700)
 
 		grpcServer := grpc.NewServer()
 		v1alpha1.RegisterCSIDriverProviderServer(grpcServer, &ProviderServer{manager: manager, permMgr: permMgr, logger: logger})
