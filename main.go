@@ -110,7 +110,7 @@ func main() {
 		os.Chmod(cfg.SocketPath, 0777)
 
 		grpcServer := grpc.NewServer()
-		v1alpha1.RegisterCSIDriverProviderServer(grpcServer, &ProviderServer{manager: manager, logger: logger})
+		v1alpha1.RegisterCSIDriverProviderServer(grpcServer, &ProviderServer{manager: manager, permMgr: permMgr, logger: logger})
 
 		logger.Info("gRPC Provider listening", "socket", cfg.SocketPath)
 		go func() { <-ctx.Done(); grpcServer.GracefulStop() }()

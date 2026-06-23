@@ -4,6 +4,10 @@ package e2e
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +19,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -72,7 +77,7 @@ func TestE2E(t *testing.T) {
 	buildAndLoadImage(t)
 
 	// 3. Deploy CSI Driver
-	deployDriver(t)
+	adminJWT := deployDriver(t)
 
 	// 4. Install Secrets Store CSI Driver
 	installSecretsStoreCSIDriver(t)
@@ -83,7 +88,11 @@ func TestE2E(t *testing.T) {
 	})
 
 	t.Run("Secret Mounting Validation", func(t *testing.T) {
-		runSecretMountingValidationTest(t)
+		runSecretMountingValidationTest(t, adminJWT)
+	})
+
+	t.Run("Namespace Permission Enforcement", func(t *testing.T) {
+		runNamespacePermissionTest(t, adminJWT)
 	})
 }
 
@@ -185,7 +194,7 @@ func buildAndLoadImage(t *testing.T) {
 	}
 }
 
-func deployDriver(t *testing.T) {
+func deployDriver(t *testing.T) string {
 	t.Log("Deploying CSI Driver Manifests...")
 
 	// Generate a throwaway age master key for the e2e test
@@ -194,6 +203,60 @@ func deployDriver(t *testing.T) {
 		t.Fatalf("Failed to generate age master key: %v", err)
 	}
 	masterKey := identity.String()
+
+	// Generate RSA key pair for JWT validation (needed to enable PermissionManager)
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("Failed to generate RSA key: %v", err)
+	}
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatalf("Failed to marshal public key: %v", err)
+	}
+	jwtPubKeyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes}))
+
+	// Generate a JWT for the e2e admin user
+	adminToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub": "e2e-admin",
+		"exp": time.Now().Add(1 * time.Hour).Unix(),
+	})
+	adminJWT, err := adminToken.SignedString(privateKey)
+	if err != nil {
+		t.Fatalf("Failed to sign admin JWT: %v", err)
+	}
+
+	// Create permission ConfigMap with namespace_permissions and admin_users
+	permYAML := `
+admin_users:
+  - e2e-admin
+namespace_permissions:
+  e2e-test:
+    - "/e2e/*"
+`
+	permConfigMap := fmt.Sprintf(`
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: csi-secret-age-perms
+  namespace: %s
+data:
+  perm.yaml: |
+%s
+`, namespace, indentLines(permYAML, "    "))
+	kubectlApply(t, permConfigMap)
+
+	// Create JWT public key Secret
+	jwtSecret := fmt.Sprintf(`
+apiVersion: v1
+kind: Secret
+metadata:
+  name: jwt-public-key
+  namespace: %s
+stringData:
+  public-key.pem: |
+%s
+`, namespace, indentLines(jwtPubKeyPEM, "    "))
+	kubectlApply(t, jwtSecret)
 
 	// Create the master key secret
 	secretManifest := fmt.Sprintf(`
@@ -270,11 +333,21 @@ spec:
               value: /etc/csi-secret-age/secrets/master-key/key.txt
             - name: SOCKET_PATH
               value: /csi/csi-secret-age.sock
+            - name: PERM_CONFIG_PATH
+              value: /etc/csi-secret-age/perm.yaml
+            - name: JWT_PUBLIC_KEY_FILE
+              value: /etc/csi-secret-age/secrets/jwt/public-key.pem
           volumeMounts:
             - name: providers-socket-dir
               mountPath: /csi
             - name: master-key-secret
               mountPath: /etc/csi-secret-age/secrets/master-key
+              readOnly: true
+            - name: perms-config
+              mountPath: /etc/csi-secret-age/perm.yaml
+              subPath: perm.yaml
+            - name: jwt-secret
+              mountPath: /etc/csi-secret-age/secrets/jwt
               readOnly: true
       volumes:
         - name: providers-socket-dir
@@ -284,6 +357,12 @@ spec:
         - name: master-key-secret
           secret:
             secretName: age-master-key
+        - name: perms-config
+          configMap:
+            name: csi-secret-age-perms
+        - name: jwt-secret
+          secret:
+            secretName: jwt-public-key
 ---
 apiVersion: v1
 kind: Service
@@ -305,6 +384,8 @@ spec:
 
 	t.Log("Waiting for CSI Secret Age DaemonSet to be ready...")
 	waitForDaemonSetPods(t, namespace, "app=csi-secret-age", 120*time.Second)
+
+	return adminJWT
 }
 
 // deployDriverViaHelm deploys the CSI provider using the Helm chart with KMS values.
@@ -485,7 +566,7 @@ func installSecretsStoreCSIDriver(t *testing.T) {
 	t.Log("Secrets-store-csi-driver restarted successfully")
 }
 
-func runSecretMountingValidationTest(t *testing.T) {
+func runSecretMountingValidationTest(t *testing.T, adminJWT string) {
 	testNamespace := "e2e-test"
 	testPodName := "secret-test-pod"
 	mountPath := "/mnt/secrets"
@@ -516,7 +597,7 @@ spec:
 
 	// 3. Add test secret via the admin API
 	t.Log("Adding test secret via admin API...")
-	addSecretViaAdminAPI(t, "/e2e/test-secret", "e2e-test-secret-value", "*", "*")
+	addSecretViaAdminAPI(t, adminJWT, "/e2e/test-secret", "e2e-test-secret-value", "*", "*")
 
 	// Wait for provider to be fully registered
 	t.Log("Waiting for provider registration...")
@@ -572,7 +653,7 @@ func getDriverPodName(t *testing.T, selector string) string {
 }
 
 // addSecretViaAdminAPI adds a secret to the vault via its HTTP admin API
-func addSecretViaAdminAPI(t *testing.T, secretPath, value, namespaces, serviceAccounts string) {
+func addSecretViaAdminAPI(t *testing.T, adminJWT, secretPath, value, namespaces, serviceAccounts string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -596,7 +677,16 @@ func addSecretViaAdminAPI(t *testing.T, secretPath, value, namespaces, serviceAc
 			secretPath, value, namespaces, serviceAccounts)
 
 		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Post("http://localhost:8090/update", "application/x-www-form-urlencoded", strings.NewReader(data))
+		req, err := http.NewRequest("POST", "http://localhost:8090/update", strings.NewReader(data))
+		if err != nil {
+			lastErr = err
+			t.Logf("Attempt %d: Failed to create request: %v", i+1, err)
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Authorization", "Bearer "+adminJWT)
+		resp, err := client.Do(req)
 		if err != nil {
 			lastErr = err
 			t.Logf("Attempt %d: Failed to add secret: %v", i+1, err)
@@ -677,4 +767,207 @@ func waitForPod(t *testing.T, namespace, podName string, timeout time.Duration) 
 			time.Sleep(2 * time.Second)
 		}
 	}
+}
+
+// indentLines adds prefix to each non-empty line of s.
+func indentLines(s, prefix string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if line != "" {
+			lines[i] = prefix + line
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// podHasFailedEvent checks if a pod has a CSI-related error event.
+func podHasFailedEvent(t *testing.T, podNamespace, podName, substr string) bool {
+	t.Helper()
+	cmd := exec.Command("kubectl", "get", "events", "-n", podNamespace,
+		"--field-selector", "involvedObject.name="+podName,
+		"-o", "jsonpath={.items[*].message}")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Logf("Failed to get pod events: %v", err)
+		return false
+	}
+	return strings.Contains(string(out), substr)
+}
+
+func runNamespacePermissionTest(t *testing.T, adminJWT string) {
+	allowedNS := "e2e-test"
+	deniedNS := "e2e-deny"
+	mountPath := "/mnt/secrets"
+	secretPath := "/e2e/ns-perm-secret"
+	secretValue := "namespace-permission-test-value"
+	fileName := "ns-perm-secret.txt"
+
+	// 1. Create namespaces
+	t.Log("Creating test namespaces...")
+	kubectlApply(t, fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+`, allowedNS))
+	// allowedNS may already exist from previous test; that's fine
+
+	kubectlApply(t, fmt.Sprintf(`
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: %s
+`, deniedNS))
+
+	// 2. Add a test secret via admin API (wildcard per-node ACLs — namespace_permissions filters)
+	t.Log("Adding test secret via admin API...")
+	addSecretViaAdminAPI(t, adminJWT, secretPath, secretValue, "*", "*")
+
+	time.Sleep(3 * time.Second)
+
+	// 3. Create a SecretProviderClass in the ALLOWED namespace
+	t.Logf("Creating SecretProviderClass in %s...", allowedNS)
+	spcManifest := fmt.Sprintf(`
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: csi-secret-age-ns-spc
+  namespace: %s
+spec:
+  provider: %s
+  parameters:
+    secrets: "%s=%s"
+`, allowedNS, providerName, fileName, secretPath)
+	kubectlApply(t, spcManifest)
+
+	// 4. Pod in ALLOWED namespace should mount successfully
+	t.Logf("Creating pod in allowed namespace %s...", allowedNS)
+	allowedPod := "ns-perm-allowed-pod"
+	podManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  containers:
+  - name: test-container
+    image: busybox:1.36
+    command: ["sh", "-c", "sleep 3600"]
+    volumeMounts:
+    - name: secrets-volume
+      mountPath: %s
+      readOnly: true
+  volumes:
+  - name: secrets-volume
+    csi:
+      driver: secrets-store.csi.k8s.io
+      readOnly: true
+      volumeAttributes:
+        secretProviderClass: csi-secret-age-ns-spc
+`, allowedPod, allowedNS, mountPath)
+	kubectlApply(t, podManifest)
+
+	waitForPod(t, allowedNS, allowedPod, 60*time.Second)
+	verifyData(t, allowedNS, allowedPod, mountPath, fileName, secretValue)
+	t.Logf("Pod in allowed namespace %s successfully mounted the secret", allowedNS)
+
+	// 5. Create a SecretProviderClass in the DENIED namespace (needs same-name SPC)
+	t.Logf("Creating SecretProviderClass in %s...", deniedNS)
+	spcDenied := fmt.Sprintf(`
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: csi-secret-age-ns-spc
+  namespace: %s
+spec:
+  provider: %s
+  parameters:
+    secrets: "%s=%s"
+`, deniedNS, providerName, fileName, secretPath)
+	kubectlApply(t, spcDenied)
+
+	// 6. Pod in DENIED namespace should be blocked
+	t.Logf("Creating pod in denied namespace %s...", deniedNS)
+	deniedPod := "ns-perm-denied-pod"
+	deniedManifest := fmt.Sprintf(`
+apiVersion: v1
+kind: Pod
+metadata:
+  name: %s
+  namespace: %s
+spec:
+  containers:
+  - name: test-container
+    image: busybox:1.36
+    command: ["sh", "-c", "sleep 3600"]
+    volumeMounts:
+    - name: secrets-volume
+      mountPath: %s
+      readOnly: true
+  volumes:
+  - name: secrets-volume
+    csi:
+      driver: secrets-store.csi.k8s.io
+      readOnly: true
+      volumeAttributes:
+        secretProviderClass: csi-secret-age-ns-spc
+`, deniedPod, deniedNS, mountPath)
+	kubectlApply(t, deniedManifest)
+
+	// Wait up to 60s; the pod should NOT become ready
+	t.Logf("Waiting for denied pod %s/%s (should fail)...", deniedNS, deniedPod)
+	denied := waitForPodToFail(t, deniedNS, deniedPod, 60*time.Second)
+	if !denied {
+		// The pod didn't fail — check events anyway
+		if podHasFailedEvent(t, deniedNS, deniedPod, "access denied") {
+			t.Logf("Denied pod %s/%s has access-denied event — correct", deniedNS, deniedPod)
+		} else {
+			// Double-check pod state
+			cmd := exec.Command("kubectl", "get", "pod", deniedPod, "-n", deniedNS, "-o", "jsonpath={.status.phase}")
+			out, _ := cmd.CombinedOutput()
+			if strings.TrimSpace(string(out)) == "Running" {
+				t.Fatalf("Pod in denied namespace %s unexpectedly reached Running state", deniedNS)
+			}
+			t.Logf("Denied pod phase: %s", strings.TrimSpace(string(out)))
+		}
+	}
+
+	// Verify the error event mentions access denied
+	if podHasFailedEvent(t, deniedNS, deniedPod, "access denied") {
+		t.Logf("Denied pod %s/%s correctly shows access denied", deniedNS, deniedPod)
+	} else {
+		// Acceptable outcome: pod simply never starts
+		t.Logf("Denied pod %s/%s did not start (expected)", deniedNS, deniedPod)
+	}
+}
+
+// waitForPodToFail waits for a pod to never become ready within the timeout.
+// Returns true if the pod failed (has error events), false if it timed out without failure.
+func waitForPodToFail(t *testing.T, namespace, podName string, timeout time.Duration) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return false
+		default:
+		}
+		// Check if pod is Running (should NOT happen)
+		cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace, "-o", "jsonpath={.status.phase}")
+		out, err := cmd.CombinedOutput()
+		if err == nil && strings.TrimSpace(string(out)) == "Running" {
+			return false
+		}
+		// Check for CSI-related error events
+		if podHasFailedEvent(t, namespace, podName, "access denied") || podHasFailedEvent(t, namespace, podName, "FailedMount") {
+			t.Logf("Pod %s/%s has failure event", namespace, podName)
+			return true
+		}
+		time.Sleep(3 * time.Second)
+	}
+	return false
 }

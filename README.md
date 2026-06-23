@@ -9,67 +9,13 @@ No external databases or heavy Vault installations are required.
 ## Features
 * **Zero Infrastructure:** State is saved as an encrypted blob inside a standard Kubernetes Secret. Backing up your cluster naturally backs up your secrets.
 * **Cold Start / Lock Mode:** The provider starts in a "Locked" state. It can be unlocked manually via the Web UI, via an environment variable, or seamlessly via Cloud KMS integrations.
-* **Granular Access Control:** Define exactly which Namespaces and ServiceAccounts can read specific paths in your secret tree.
+* **Two-Layer Access Control:** Per-secret ACLs restrict by namespace and service account. Per-namespace path-pattern policies restrict entire namespaces or specific workloads to only the subtrees they need.
 * **Web UI JWT Permissions:** In production (non-dev mode), the Web UI can enforce JWT-based RBAC so users only see and manage the parts of the tree they own.
 * **Modern Cryptography:** Powered by the modern, secure `filippo.io/age` encryption standard.
 * **Cloud KMS Ready:** Extensible `MasterKeyProvider` interface allows fetching the master unlock key from AWS KMS, GCP KMS, or Azure KeyVault.
 * **Memory Safe:** Built using Go 1.24+ `runtime/secret` experiment. All decryption, JSON parsing, and string manipulation happen inside a secure execution enclave. Plaintext secrets are strictly zeroed out from heap memory when no longer needed.
 
----
 
-## Architecture & Lifecycle
-
-1. **Deployment:** The CSI provider is deployed as a DaemonSet. If no Master Key is provided, it starts in **Locked** mode.
-2. **Unlocking:** An administrator provides the Master Key via the local Web UI, or the system auto-fetches it via a Cloud KMS plugin.
-3. **Administration:** Using the local Web UI, administrators can blind-write new secrets and define Access Control Lists (ACLs). The Web UI masks all values and strips plaintext before rendering HTML to prevent memory leaks.
-4. **Encryption:** The Provider serializes and encrypts the tree using the `age` public key, storing it in `kube-system/csi-secret-age-backend`.
-5. **Concurrent-Safe Writes:** The Web UI and any write path use optimistic locking (`ResourceVersion`) on the Kubernetes Secret. If multiple pods (or multiple users) try to update the vault simultaneously, the first one succeeds and the others automatically retry their read-modify-write cycle up to 5 times. This prevents lost updates when running multiple DaemonSet replicas per node.
-6. **Mounting:** When a Pod requests a secret, the Provider dynamically decrypts the Vault Tree *in-memory*, evaluates the ACL against the requesting Pod's Namespace/ServiceAccount, and securely mounts the secret into the Pod.
-
-```mermaid
-flowchart TB
-    subgraph K8sCluster["Kubernetes Cluster"]
-        subgraph NodeA["Node A"]
-            PodA1["Workload Pod"]
-            DS_A["DaemonSet Pod<br/>gRPC CSI + HTTP UI"]
-        end
-
-        subgraph NodeB["Node B"]
-            PodB1["Workload Pod"]
-            DS_B["DaemonSet Pod<br/>gRPC CSI + HTTP UI"]
-        end
-
-        subgraph NodeC["Node N ..."]
-            DS_C["DaemonSet Pod<br/>gRPC CSI + HTTP UI"]
-        end
-
-        subgraph APIServer["API Server"]
-            Secret[("Kubernetes Secret<br/>csi-secret-age-backend")]
-            RV["ResourceVersion<br/>Optimistic Lock"]
-        end
-    end
-
-    Admin["Admin Browser"] -. "HTTP /update<br/>Read → Modify → Write" .-> DS_A
-    Admin -. "HTTP /delete" .-> DS_B
-
-    PodA1 -->|"MountRequest<br/>/db/pass"| DS_A
-    DS_A -->|"Get Secret<br/>Decrypt Tree"| Secret
-    DS_A -->|"Return File<br/>/mnt/secrets/db-pass"| PodA1
-
-    PodB1 -->|"MountRequest"| DS_B
-    DS_B -->|"Get Secret"| Secret
-    DS_B -->|"Return File"| PodB1
-
-    DS_A -. "Update Secret<br/>with ResourceVersion" .-> Secret
-    DS_B -. "Update Secret<br/>with ResourceVersion" .-> Secret
-    DS_C -. "Update Secret<br/>with ResourceVersion" .-> Secret
-
-    Secret -.-> RV
-    RV -. "Conflict = Retry" .-> DS_B
-    RV -. "Conflict = Retry" .-> DS_C
-```
-
----
 
 ## Prerequisites
 
@@ -163,9 +109,56 @@ containers:
         value: /etc/csi-secret-age/key.txt
 ```
 
----
+## Namespace & Workload Read Restrictions
 
-## Web UI User Permissions (Production)
+For the workloads to read some parts of the secrets tree, it must be authorized, per namespace or namespace & SA.
+
+You can define **namespace-level path-pattern policies** that restrict which subtrees a namespace or workload can read. This is configured in `perm.yaml`, under the `namespace_permissions` key.
+
+| Identity | Can read |
+|---|---|
+| `nats` namespace (all workloads) | Only `/nats/*` secrets |
+| `envoy-gateway-system` namespace (all workloads) | Only `/envoy/*` secrets |
+| `monitoring` namespace with `monitoring-sa` | Only `/prometheus/*` **and** `/prod/metrics/*` |
+| Any other namespace or SA (e.g. `default`) | Denied (not listed) |
+
+The `perm.yaml` ConfigMap would look like this:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: csi-secret-age-perms
+  namespace: kube-system
+data:
+  perm.yaml: |
+    admin_users:
+      - platform-team
+
+    # Namespace-level read restrictions / SA read restrictions
+    namespace_permissions:
+      nats:
+        - "/nats/*"
+      envoy-gateway-system:
+        - "/envoy/*"
+      monitoring/monitoring-sa:
+        - "/prometheus/*"
+        - "/prod/metrics/*"
+```
+
+Service-account-specific keys (`namespace/sa`) **take precedence over** namespace-only keys (`namespace`). If neither matches, access is denied.
+
+### When to Use Each Layer
+
+| Layer | Scope | Best For |
+|---|---|---|
+| **Per-Secret ACLs** (`AllowedNamespaces`, `AllowedServiceAccounts`) | One secret at a time | Fine-grained: "only the `db-client` SA in `prod` can read this password" |
+| **Namespace Policies** (`namespace_permissions`) | Entire subtree | Defense in depth: "the `staging` namespace can only ever see `/staging/*`, no matter what a per-secret ACL says" |
+
+Both layers must pass for a secret to be mounted. If either denies, the request is rejected.
+
+## Web UI User Permissions
+You can give permissions to users to access parts of the secret tree, write/update only.
 
 When running in a real cluster (i.e. **not** `DEV_MODE=true`), you can enforce JWT-based access control on the Web UI. This ensures users only see, create, update, or delete secrets within the branches they are allowed to access.
 
@@ -179,13 +172,16 @@ metadata:
   namespace: kube-system
 data:
   perm.yaml: |
-    userA:
-      - "/nats/*"
-      - "/postgresql/*"
-    userB:
-      - "/app/*"
-    admin:
+    admin_users:
       - userH
+
+    # User permissions for the Web UI
+    user_permissions:
+      userA:
+        - "/nats/*"
+        - "/postgresql/*"
+      userB:
+        - "/app/*"
 ```
 
 Rules:
@@ -234,6 +230,7 @@ env:
 When these are set, every request to the Web UI must include a valid `Authorization: Bearer <jwt>` token. The UI will then only show folders and secrets the user is allowed to read.
 
 > **Tip:** In `DEV_MODE=true`, the permission system is **not** enforced. The Web UI remains open so you can develop and test without generating JWTs.
+
 
 ---
 
@@ -389,3 +386,56 @@ When compiled with `GOEXPERIMENT=runtimesecret` (see the `AGENTS.md`):
 3. **Template Protection:** The Web UI HTML template renderer only ever receives stripped structs. The plaintext secrets never accidentally escape onto the heap where the HTTP server could leave them lingering in memory.
 
 This completely prevents secrets from lingering in memory space, protecting against memory dumping attacks (e.g., via compromised container host or core dumps).
+
+## Architecture & Lifecycle
+
+1. **Deployment:** The CSI provider is deployed as a DaemonSet. If no Master Key is provided, it starts in **Locked** mode.
+2. **Unlocking:** An administrator provides the Master Key via the local Web UI, or the system auto-fetches it via a Cloud KMS plugin.
+3. **Administration:** Using the local Web UI, administrators can blind-write new secrets and define Access Control Lists (ACLs). The Web UI masks all values and strips plaintext before rendering HTML to prevent memory leaks.
+4. **Encryption:** The Provider serializes and encrypts the tree using the `age` public key, storing it in `kube-system/csi-secret-age-backend`.
+5. **Concurrent-Safe Writes:** The Web UI and any write path use optimistic locking (`ResourceVersion`) on the Kubernetes Secret. If multiple pods (or multiple users) try to update the vault simultaneously, the first one succeeds and the others automatically retry their read-modify-write cycle up to 5 times. This prevents lost updates when running multiple DaemonSet replicas per node.
+6. **Mounting:** When a Pod requests a secret, the Provider dynamically decrypts the Vault Tree *in-memory*, evaluates the ACL against the requesting Pod's Namespace/ServiceAccount, and securely mounts the secret into the Pod.
+
+```mermaid
+flowchart TB
+    subgraph K8sCluster["Kubernetes Cluster"]
+        subgraph NodeA["Node A"]
+            PodA1["Workload Pod"]
+            DS_A["DaemonSet Pod<br/>gRPC CSI + HTTP UI"]
+        end
+
+        subgraph NodeB["Node B"]
+            PodB1["Workload Pod"]
+            DS_B["DaemonSet Pod<br/>gRPC CSI + HTTP UI"]
+        end
+
+        subgraph NodeC["Node N ..."]
+            DS_C["DaemonSet Pod<br/>gRPC CSI + HTTP UI"]
+        end
+
+        subgraph APIServer["API Server"]
+            Secret[("Kubernetes Secret<br/>csi-secret-age-backend")]
+            RV["ResourceVersion<br/>Optimistic Lock"]
+        end
+    end
+
+    Admin["Admin Browser"] -. "HTTP /update<br/>Read → Modify → Write" .-> DS_A
+    Admin -. "HTTP /delete" .-> DS_B
+
+    PodA1 -->|"MountRequest<br/>/db/pass"| DS_A
+    DS_A -->|"Get Secret<br/>Decrypt Tree"| Secret
+    DS_A -->|"Return File<br/>/mnt/secrets/db-pass"| PodA1
+
+    PodB1 -->|"MountRequest"| DS_B
+    DS_B -->|"Get Secret"| Secret
+    DS_B -->|"Return File"| PodB1
+
+    DS_A -. "Update Secret<br/>with ResourceVersion" .-> Secret
+    DS_B -. "Update Secret<br/>with ResourceVersion" .-> Secret
+    DS_C -. "Update Secret<br/>with ResourceVersion" .-> Secret
+
+    Secret -.-> RV
+    RV -. "Conflict = Retry" .-> DS_B
+    RV -. "Conflict = Retry" .-> DS_C
+```
+

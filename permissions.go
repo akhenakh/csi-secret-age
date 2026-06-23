@@ -19,9 +19,10 @@ type PermissionManager struct {
 	publicKey  *rsa.PublicKey
 	userClaim  string
 
-	mu          sync.RWMutex
-	permissions map[string][]string
-	admins      []string
+	mu                    sync.RWMutex
+	permissions           map[string][]string
+	admins                []string
+	namespacePermissions  map[string][]string
 }
 
 // UserPermissions holds the resolved permissions for a single user.
@@ -85,7 +86,7 @@ func (pm *PermissionManager) Load() error {
 		return fmt.Errorf("failed to read permissions file: %w", err)
 	}
 
-	var raw map[string][]string
+	var raw map[string]yaml.Node
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		return fmt.Errorf("failed to parse permissions file: %w", err)
 	}
@@ -94,12 +95,33 @@ func (pm *PermissionManager) Load() error {
 	defer pm.mu.Unlock()
 
 	pm.permissions = make(map[string][]string)
-	for key, val := range raw {
-		if key == "admin" {
-			pm.admins = val
-			continue
+	pm.namespacePermissions = make(map[string][]string)
+
+	for key, node := range raw {
+		switch key {
+		case "admin_users":
+			if err := node.Decode(&pm.admins); err != nil {
+				return fmt.Errorf("failed to parse admin list: %w", err)
+			}
+		case "user_permissions":
+			var userNode map[string]yaml.Node
+			if err := node.Decode(&userNode); err != nil {
+				return fmt.Errorf("failed to parse user permissions: %w", err)
+			}
+			for userKey, userVal := range userNode {
+				var patterns []string
+				if err := userVal.Decode(&patterns); err != nil {
+					return fmt.Errorf("failed to parse permissions for %s: %w", userKey, err)
+				}
+				pm.permissions[userKey] = patterns
+			}
+		case "namespace_permissions":
+			if err := node.Decode(&pm.namespacePermissions); err != nil {
+				return fmt.Errorf("failed to parse namespace permissions: %w", err)
+			}
+		default:
+			return fmt.Errorf("unknown top-level key %q in permissions file", key)
 		}
-		pm.permissions[key] = val
 	}
 
 	return nil
@@ -193,4 +215,34 @@ func matchPermission(pattern, vaultPath string) bool {
 	}
 
 	return pattern == vaultPath
+}
+
+func (pm *PermissionManager) CanAccess(namespace, sa, vaultPath string) bool {
+	if pm == nil {
+		return true
+	}
+
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	key := namespace + "/" + sa
+	if patterns, ok := pm.namespacePermissions[key]; ok {
+		for _, pattern := range patterns {
+			if matchPermission(pattern, vaultPath) {
+				return true
+			}
+		}
+		return false
+	}
+
+	if patterns, ok := pm.namespacePermissions[namespace]; ok {
+		for _, pattern := range patterns {
+			if matchPermission(pattern, vaultPath) {
+				return true
+			}
+		}
+		return false
+	}
+
+	return false
 }

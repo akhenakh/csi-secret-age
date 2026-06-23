@@ -60,13 +60,14 @@ metadata:
   namespace: kube-system
 data:
   perm.yaml: |
-    userA:
-      - "/nats/*"
-      - "/postgresql/*"
-    userB:
-      - "/app/*"
-    admin:
+    admin_users:
       - userH
+    user_permissions:
+      userA:
+        - "/nats/*"
+        - "/postgresql/*"
+      userB:
+        - "/app/*"
 ---
 apiVersion: v1
 kind: ServiceAccount

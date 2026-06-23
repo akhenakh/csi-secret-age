@@ -426,13 +426,14 @@ func TestPermissionManager_Load(t *testing.T) {
 	tmpDir := t.TempDir()
 	permPath := filepath.Join(tmpDir, "perm.yaml")
 	content := `
-userA:
-  - "/nats/*"
-  - "/postgresql/*"
-userB:
-  - "/app/*"
-admin:
+admin_users:
   - userH
+user_permissions:
+  userA:
+    - "/nats/*"
+    - "/postgresql/*"
+  userB:
+    - "/app/*"
 `
 	require.NoError(t, os.WriteFile(permPath, []byte(content), 0644))
 
@@ -472,6 +473,224 @@ admin:
 	assert.False(t, unknown.CanRead("/nats/secret"))
 }
 
+func TestPermissionManager_CanAccess(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	tests := []struct {
+		name     string
+		yaml     string
+		ns       string
+		sa       string
+		path     string
+		want     bool
+	}{
+		{
+			name: "empty namespace_permissions denies all",
+			yaml: `
+user_permissions:
+  userA:
+    - "/nats/*"
+`,
+			ns:   "staging", sa: "web", path: "/any/secret",
+			want: false,
+		},
+		{
+			name: "namespace matches pattern",
+			yaml: `
+namespace_permissions:
+  staging:
+    - "/staging/*"
+`,
+			ns:   "staging", sa: "web", path: "/staging/db/pass",
+			want: true,
+		},
+		{
+			name: "namespace matches but path does not",
+			yaml: `
+namespace_permissions:
+  staging:
+    - "/staging/*"
+`,
+			ns:   "staging", sa: "web", path: "/prod/secret",
+			want: false,
+		},
+		{
+			name: "namespace not in config is denied",
+			yaml: `
+namespace_permissions:
+  staging:
+    - "/staging/*"
+`,
+			ns:   "prod", sa: "app", path: "/any/secret",
+			want: false,
+		},
+		{
+			name: "namespace and sa match pattern",
+			yaml: `
+namespace_permissions:
+  staging/web:
+    - "/staging/web/*"
+`,
+			ns:   "staging", sa: "web", path: "/staging/web/key",
+			want: true,
+		},
+		{
+			name: "sa-specific restriction takes precedence over namespace",
+			yaml: `
+namespace_permissions:
+  staging:
+    - "/staging/*"
+  staging/db:
+    - "/staging/db/*"
+`,
+			ns:   "staging", sa: "db", path: "/staging/app/secret",
+			want: false,
+		},
+		{
+			name: "sa-specific allows when namespace would also match",
+			yaml: `
+namespace_permissions:
+  staging/db:
+    - "/staging/db/*"
+`,
+			ns:   "staging", sa: "db", path: "/staging/db/pass",
+			want: true,
+		},
+		{
+			name: "nil PermissionManager allows all",
+			ns:   "staging", sa: "web", path: "/any/secret",
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var pm *PermissionManager
+			if tt.yaml != "" {
+				permPath := filepath.Join(t.TempDir(), "perm.yaml")
+				require.NoError(t, os.WriteFile(permPath, []byte(tt.yaml), 0644))
+				pm, err = NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+				require.NoError(t, err)
+			}
+			got := pm.CanAccess(tt.ns, tt.sa, tt.path)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestProviderServer_Mount_NamespacePermissions(t *testing.T) {
+	ctx := context.Background()
+	fakeClient := fake.NewSimpleClientset()
+	cfg := Config{
+		MasterKey:       generateTestMasterKey(t),
+		VaultSecretName: "test-vault",
+		VaultNamespace:  "kube-system",
+	}
+
+	keyProvider := &EnvKeyProvider{Key: cfg.MasterKey}
+	mgr := NewVaultManager(cfg, fakeClient, keyProvider)
+	require.False(t, mgr.IsLocked())
+
+	tree := &VaultTree{
+		Nodes: map[string]*VaultNode{
+			"/staging/db/pass": {
+				Value:                  "staging-db-secret",
+				AllowedNamespaces:      []string{"*"},
+				AllowedServiceAccounts: []string{"*"},
+			},
+			"/prod/api/key": {
+				Value:                  "prod-api-secret",
+				AllowedNamespaces:      []string{"*"},
+				AllowedServiceAccounts: []string{"*"},
+			},
+		},
+	}
+	require.NoError(t, mgr.EncryptAndSave(ctx, tree))
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	permPath := filepath.Join(t.TempDir(), "perm.yaml")
+	permYAML := `
+namespace_permissions:
+  staging:
+    - "/staging/*"
+  prod/web:
+    - "/prod/web/*"
+`
+	require.NoError(t, os.WriteFile(permPath, []byte(permYAML), 0644))
+	permMgr, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	server := &ProviderServer{
+		manager: mgr,
+		permMgr: permMgr,
+		logger:  getTestLogger(),
+	}
+
+	makeMountReq := func(ns, sa, secretsConfig string) *v1alpha1.MountRequest {
+		attrs := map[string]string{
+			"csi.storage.k8s.io/pod.namespace":       ns,
+			"csi.storage.k8s.io/serviceAccount.name": sa,
+			"secrets":                                secretsConfig,
+		}
+		attrBytes, _ := json.Marshal(attrs)
+		return &v1alpha1.MountRequest{Attributes: string(attrBytes)}
+	}
+
+	tests := []struct {
+		name        string
+		req         *v1alpha1.MountRequest
+		expectErr   bool
+		errContains string
+	}{
+		{
+			name:      "staging namespace can read staging secrets",
+			req:       makeMountReq("staging", "any", "db=/staging/db/pass"),
+			expectErr: false,
+		},
+		{
+			name:        "staging namespace denied from prod secrets",
+			req:         makeMountReq("staging", "any", "key=/prod/api/key"),
+			expectErr:   true,
+			errContains: "access denied to path /prod/api/key",
+		},
+		{
+			name:        "prod/web SA denied from staging secrets",
+			req:         makeMountReq("prod", "web", "db=/staging/db/pass"),
+			expectErr:   true,
+			errContains: "access denied to path /staging/db/pass",
+		},
+		{
+			name:        "unlisted namespace is denied",
+			req:         makeMountReq("dev", "any", "db=/staging/db/pass"),
+			expectErr:   true,
+			errContains: "access denied to path /staging/db/pass",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := server.Mount(ctx, tt.req)
+			if tt.expectErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+				assert.Nil(t, resp)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, resp)
+			}
+		})
+	}
+}
+
 func TestPermissionManager_ValidateJWT(t *testing.T) {
 	// Generate RSA key pair
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -482,7 +701,7 @@ func TestPermissionManager_ValidateJWT(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	permPath := filepath.Join(tmpDir, "perm.yaml")
-	require.NoError(t, os.WriteFile(permPath, []byte("admin:\n  - userH\n"), 0644))
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - userH\n"), 0644))
 
 	pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
 	require.NoError(t, err)
