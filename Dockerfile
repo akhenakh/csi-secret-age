@@ -25,4 +25,5 @@ RUN BUILD_TAGS="" && \
 FROM gcr.io/distroless/static-debian12
 WORKDIR /
 COPY --from=builder /app/csi-secret-age /csi-secret-age
+ENV GOEXPERIMENT=runtimesecret
 ENTRYPOINT ["/csi-secret-age"]
