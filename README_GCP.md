@@ -84,16 +84,16 @@ volumes:
     secret:
       secretName: age-gcpkms-config
 containers:
-  - name: age-vault-csi
+  - name: csi-secret-age
     volumeMounts:
       - name: gcpkms-config
-        mountPath: /etc/age-vault/gcpkms
+        mountPath: /etc/csi-secret-age/gcpkms
         readOnly: true
     env:
       - name: GCP_KMS_KEY_NAME_FILE
-        value: /etc/age-vault/gcpkms/keyname
+        value: /etc/csi-secret-age/gcpkms/keyname
       - name: GCP_KMS_CIPHERTEXT_FILE
-        value: /etc/age-vault/gcpkms/ciphertext
+        value: /etc/csi-secret-age/gcpkms/ciphertext
 ```
 
 Remove or comment out the `MASTER_KEY` env var.
@@ -112,7 +112,7 @@ Then build:
 GOEXPERIMENT=runtimesecret go build -tags gcpkms -o csi-secret-age .
 
 # For Docker (auto-generates go.work inside the build):
-docker build --build-arg GCPKMS_ENABLED=true -t age-vault-csi:latest .
+docker build --build-arg GCPKMS_ENABLED=true -t csi-secret-age:latest .
 ```
 
 To enable both AWS and GCP KMS:
@@ -121,7 +121,7 @@ To enable both AWS and GCP KMS:
 GOEXPERIMENT=runtimesecret go build -tags "kms,gcpkms" -o csi-secret-age .
 
 # Docker:
-docker build --build-arg KMS_ENABLED=true --build-arg GCPKMS_ENABLED=true -t age-vault-csi:latest .
+docker build --build-arg KMS_ENABLED=true --build-arg GCPKMS_ENABLED=true -t csi-secret-age:latest .
 ```
 
 ## Required IAM Permissions

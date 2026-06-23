@@ -29,7 +29,7 @@ Single-binary Go CSI provider for Kubernetes. All code lives in one package (`ma
 
 - `deploy.yaml` is the hand-written Kubernetes manifest (RBAC + DaemonSet). It is not generated.
 - The provider expects the Secrets Store CSI Driver to be pre-installed in the cluster (see README for helm command).
-- The DaemonSet uses `hostNetwork: true` and a Unix socket at `/csi/agevault.sock`.
+- The DaemonSet uses `hostNetwork: true` and a Unix socket at `/csi/csi-secret-age.sock`.
 
 ## Testing Conventions
 
@@ -58,4 +58,4 @@ Single-binary Go CSI provider for Kubernetes. All code lives in one package (`ma
 ## Repo Hygiene
 
 - `key.txt` is a local age secret key used in development. It should never be committed.
-- No `Dockerfile` in repo yet; image is referenced in `deploy.yaml` as `age-vault-csi:latest`.
+- No `Dockerfile` in repo yet; image is referenced in `deploy.yaml` as `csi-secret-age:latest`.

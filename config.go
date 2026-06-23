@@ -19,9 +19,9 @@ type Config struct {
 	MasterKey     string `env:"MASTER_KEY"`
 	MasterKeyFile string `env:"MASTER_KEY_FILE"`
 
-	VaultSecretName string `env:"VAULT_SECRET_NAME" envDefault:"age-vault-backend"`
+	VaultSecretName string `env:"VAULT_SECRET_NAME" envDefault:"csi-secret-age-backend"`
 	VaultNamespace  string `env:"VAULT_NAMESPACE" envDefault:"kube-system"`
-	SocketPath      string `env:"SOCKET_PATH" envDefault:"/tmp/age-vault.sock"`
+	SocketPath      string `env:"SOCKET_PATH" envDefault:"/tmp/csi-secret-age.sock"`
 	HTTPPort        int    `env:"HTTP_PORT" envDefault:"8090"`
 	DevMode         bool   `env:"DEV_MODE" envDefault:"false"`
 

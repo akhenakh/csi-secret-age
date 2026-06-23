@@ -109,7 +109,7 @@ func (s *ProviderServer) Mount(ctx context.Context, req *v1alpha1.MountRequest) 
 func (s *ProviderServer) Version(ctx context.Context, req *v1alpha1.VersionRequest) (*v1alpha1.VersionResponse, error) {
 	return &v1alpha1.VersionResponse{
 		Version:        "v1alpha1",
-		RuntimeName:    "age-vault-provider",
+		RuntimeName:    "csi-secret-age-provider",
 		RuntimeVersion: "1.0.0",
 	}, nil
 }

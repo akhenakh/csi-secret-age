@@ -22,7 +22,7 @@ No external databases or heavy Vault installations are required.
 1. **Deployment:** The CSI provider is deployed as a DaemonSet. If no Master Key is provided, it starts in **Locked** mode.
 2. **Unlocking:** An administrator provides the Master Key via the local Web UI, or the system auto-fetches it via a Cloud KMS plugin.
 3. **Administration:** Using the local Web UI, administrators can blind-write new secrets and define Access Control Lists (ACLs). The Web UI masks all values and strips plaintext before rendering HTML to prevent memory leaks.
-4. **Encryption:** The Provider serializes and encrypts the tree using the `age` public key, storing it in `kube-system/age-vault-backend`.
+4. **Encryption:** The Provider serializes and encrypts the tree using the `age` public key, storing it in `kube-system/csi-secret-age-backend`.
 5. **Concurrent-Safe Writes:** The Web UI and any write path use optimistic locking (`ResourceVersion`) on the Kubernetes Secret. If multiple pods (or multiple users) try to update the vault simultaneously, the first one succeeds and the others automatically retry their read-modify-write cycle up to 5 times. This prevents lost updates when running multiple DaemonSet replicas per node.
 6. **Mounting:** When a Pod requests a secret, the Provider dynamically decrypts the Vault Tree *in-memory*, evaluates the ACL against the requesting Pod's Namespace/ServiceAccount, and securely mounts the secret into the Pod.
 
@@ -44,7 +44,7 @@ flowchart TB
         end
 
         subgraph APIServer["API Server"]
-            Secret[("Kubernetes Secret<br/>age-vault-backend")]
+            Secret[("Kubernetes Secret<br/>csi-secret-age-backend")]
             RV["ResourceVersion<br/>Optimistic Lock"]
         end
     end
@@ -102,7 +102,7 @@ kubectl apply -f deploy.yaml
 ```
 Verify the daemonset is running:
 ```bash
-kubectl get pods -n kube-system -l app=age-vault-csi
+kubectl get pods -n kube-system -l app=csi-secret-age
 ```
 
 > **Note on Multiple Replicas:** The DaemonSet can safely run multiple provider pods per node. All instances share the same encrypted Kubernetes Secret backend. The built-in optimistic locking (`ResourceVersion` retries) ensures that concurrent writes from different pods (or concurrent UI sessions) never overwrite each other.
@@ -112,7 +112,7 @@ By default, the provider starts in **Locked** mode. Pods trying to mount secrets
 
 Port-forward the Admin API:
 ```bash
-kubectl port-forward -n kube-system ds/age-vault-csi 8090:8090
+kubectl port-forward -n kube-system ds/csi-secret-age 8090:8090
 ```
 1. Open http://localhost:8090 in your browser.
 2. You will see the **Vault Locked 🔒** screen.
@@ -153,14 +153,14 @@ volumes:
     secret:
       secretName: age-master-key
 containers:
-  - name: age-vault-csi
+  - name: csi-secret-age
     volumeMounts:
       - name: master-key
-        mountPath: /etc/age-vault
+        mountPath: /etc/csi-secret-age
         readOnly: true
     env:
       - name: MASTER_KEY_FILE
-        value: /etc/age-vault/key.txt
+        value: /etc/csi-secret-age/key.txt
 ```
 
 ---
@@ -175,7 +175,7 @@ When running in a real cluster (i.e. **not** `DEV_MODE=true`), you can enforce J
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: age-vault-perms
+  name: csi-secret-age-perms
   namespace: kube-system
 data:
   perm.yaml: |
@@ -217,7 +217,7 @@ The DaemonSet in `deploy.yaml` already includes the volume mounts and env vars. 
 ```yaml
 env:
   - name: PERM_CONFIG_PATH
-    value: /etc/age-vault/perm.yaml
+    value: /etc/csi-secret-age/perm.yaml
   # Option A: inline value
   - name: JWT_PUBLIC_KEY
     valueFrom:
@@ -226,7 +226,7 @@ env:
         key: JWT_PUBLIC_KEY
   # Option B: read from a mounted file (preferred for large PEM keys)
   # - name: JWT_PUBLIC_KEY_FILE
-  #   value: /etc/age-vault/jwt-public-key.pem
+  #   value: /etc/csi-secret-age/jwt-public-key.pem
   - name: JWT_USER_CLAIM
     value: "sub"  # default; the JWT claim to use as the username
 ```
@@ -246,18 +246,18 @@ The built-in HTTP admin UI is designed for simplicity and does not implement TLS
 Do **not** expose the admin port directly on the node network. Instead:
 
 1. **Remove the Service from `deploy.yaml`** (the DaemonSet uses `hostNetwork: true`, so no Service is needed for internal CSI gRPC).
-2. **Port-forward for local access** with `kubectl port-forward -n kube-system ds/age-vault-csi 8090:8090` and access via `https://localhost:8090`.
+2. **Port-forward for local access** with `kubectl port-forward -n kube-system ds/csi-secret-age 8090:8090` and access via `https://localhost:8090`.
 3. **Or, place a reverse proxy in front** if remote browser access is required:
 
 ```yaml
 apiVersion: v1
 kind: Service
 metadata:
-  name: age-vault-admin
+  name: csi-secret-age-admin
   namespace: kube-system
 spec:
   selector:
-    app: age-vault-csi
+    app: csi-secret-age
   ports:
     - port: 443
       targetPort: 8090
@@ -303,7 +303,7 @@ metadata:
   name: app-secrets
   namespace: production
 spec:
-  provider: agevault
+  provider: csi-secret-age
   parameters:
     # Format: "filename_to_mount=/vault/path, next_file=/next/path"
     secrets: "db-pass=/db/postgres/password, stripe-key=/api/stripe/key"

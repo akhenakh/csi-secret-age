@@ -56,7 +56,7 @@ stringData:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: age-vault-perms
+  name: csi-secret-age-perms
   namespace: kube-system
 data:
   perm.yaml: |
@@ -71,18 +71,18 @@ data:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: age-vault-csi-sa
+  name: csi-secret-age-sa
   namespace: kube-system
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: age-vault-csi-role
+  name: csi-secret-age-role
 rules:
   # Allows reading and updating the backed Kubernetes Secret containing the Vault
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["age-vault-backend"]
+    resourceNames: ["csi-secret-age-backend"]
     verbs: ["get", "update"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -91,62 +91,62 @@ rules:
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: age-vault-csi-binding
+  name: csi-secret-age-binding
 subjects:
   - kind: ServiceAccount
-    name: age-vault-csi-sa
+    name: csi-secret-age-sa
     namespace: kube-system
 roleRef:
   kind: ClusterRole
-  name: age-vault-csi-role
+  name: csi-secret-age-role
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: age-vault-csi
+  name: csi-secret-age
   namespace: kube-system
 spec:
   selector:
     matchLabels:
-      app: age-vault-csi
+      app: csi-secret-age
   template:
     metadata:
       labels:
-        app: age-vault-csi
+        app: csi-secret-age
     spec:
-      serviceAccountName: age-vault-csi-sa
+      serviceAccountName: csi-secret-age-sa
       hostNetwork: true
       containers:
         - name: csi-driver
-          image: age-vault-csi:latest
+          image: csi-secret-age:latest
           env:
             - name: MASTER_KEY_FILE
-              value: /etc/age-vault/secrets/master-key/key.txt
+              value: /etc/csi-secret-age/secrets/master-key/key.txt
             # Uncomment to use AWS KMS instead of MASTER_KEY_FILE:
             # - name: KMS_CIPHERTEXT_FILE
-            #   value: /etc/age-vault/secrets/kms/ciphertext
+            #   value: /etc/csi-secret-age/secrets/kms/ciphertext
             # Uncomment to use GCP KMS instead of MASTER_KEY_FILE:
             # - name: GCP_KMS_KEY_NAME_FILE
-            #   value: /etc/age-vault/secrets/gcpkms/keyName
+            #   value: /etc/csi-secret-age/secrets/gcpkms/keyName
             # - name: GCP_KMS_CIPHERTEXT_FILE
-            #   value: /etc/age-vault/secrets/gcpkms/ciphertext
+            #   value: /etc/csi-secret-age/secrets/gcpkms/ciphertext
             - name: JWT_PUBLIC_KEY_FILE
-              value: /etc/age-vault/secrets/jwt/jwt-public-key.pem
+              value: /etc/csi-secret-age/secrets/jwt/jwt-public-key.pem
             - name: PERM_CONFIG_PATH
-              value: /etc/age-vault/perm.yaml
+              value: /etc/csi-secret-age/perm.yaml
             - name: SOCKET_PATH
-              value: /csi/agevault.sock
+              value: /csi/csi-secret-age.sock
           volumeMounts:
             - name: providers-socket-dir
               mountPath: /csi
             - name: perms-config
-              mountPath: /etc/age-vault
+              mountPath: /etc/csi-secret-age
             - name: master-key-secret
-              mountPath: /etc/age-vault/secrets/master-key
+              mountPath: /etc/csi-secret-age/secrets/master-key
               readOnly: true
             - name: jwt-public-key-secret
-              mountPath: /etc/age-vault/secrets/jwt
+              mountPath: /etc/csi-secret-age/secrets/jwt
               readOnly: true
       volumes:
         - name: providers-socket-dir
@@ -155,7 +155,7 @@ spec:
             type: DirectoryOrCreate
         - name: perms-config
           configMap:
-            name: age-vault-perms
+            name: csi-secret-age-perms
         - name: master-key-secret
           secret:
             secretName: age-master-key

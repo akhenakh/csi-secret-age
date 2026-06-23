@@ -70,14 +70,14 @@ volumes:
     secret:
       secretName: age-kms-ciphertext
 containers:
-  - name: age-vault-csi
+  - name: csi-secret-age
     volumeMounts:
       - name: kms-ciphertext
-        mountPath: /etc/age-vault/kms
+        mountPath: /etc/csi-secret-age/kms
         readOnly: true
     env:
       - name: KMS_CIPHERTEXT_FILE
-        value: /etc/age-vault/kms/ciphertext
+        value: /etc/csi-secret-age/kms/ciphertext
 ```
 
 Remove or comment out the `MASTER_KEY` env var — the KMS provider takes precedence when `KMS_CIPHERTEXT` (or `KMS_CIPHERTEXT_FILE`) is set.
@@ -96,7 +96,7 @@ Then build:
 GOEXPERIMENT=runtimesecret go build -tags kms -o csi-secret-age .
 
 # For Docker (auto-generates go.work inside the build):
-docker build --build-arg KMS_ENABLED=true -t age-vault-csi:latest .
+docker build --build-arg KMS_ENABLED=true -t csi-secret-age:latest .
 ```
 
 ## Required IAM Permissions

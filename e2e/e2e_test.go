@@ -20,7 +20,7 @@ import (
 const (
 	clusterName = "csi-secret-age-cluster"
 	imageName   = "csi-secret-age:e2e"
-	providerName = "agevault"
+	providerName = "csi-secret-age"
 	namespace   = "kube-system"
 )
 
@@ -212,17 +212,17 @@ stringData:
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: age-vault-csi-sa
+  name: csi-secret-age-sa
   namespace: %s
 ---
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: age-vault-csi-role
+  name: csi-secret-age-role
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["age-vault-backend"]
+    resourceNames: ["csi-secret-age-backend"]
     verbs: ["get", "update"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -231,31 +231,31 @@ rules:
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  name: age-vault-csi-binding
+  name: csi-secret-age-binding
 subjects:
   - kind: ServiceAccount
-    name: age-vault-csi-sa
+    name: csi-secret-age-sa
     namespace: %s
 roleRef:
   kind: ClusterRole
-  name: age-vault-csi-role
+  name: csi-secret-age-role
   apiGroup: rbac.authorization.k8s.io
 ---
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: age-vault-csi
+  name: csi-secret-age
   namespace: %s
 spec:
   selector:
     matchLabels:
-      app: age-vault-csi
+      app: csi-secret-age
   template:
     metadata:
       labels:
-        app: age-vault-csi
+        app: csi-secret-age
     spec:
-      serviceAccountName: age-vault-csi-sa
+      serviceAccountName: csi-secret-age-sa
       hostNetwork: true
       containers:
         - name: csi-driver
@@ -267,14 +267,14 @@ spec:
               protocol: TCP
           env:
             - name: MASTER_KEY_FILE
-              value: /etc/age-vault/secrets/master-key/key.txt
+              value: /etc/csi-secret-age/secrets/master-key/key.txt
             - name: SOCKET_PATH
-              value: /csi/agevault.sock
+              value: /csi/csi-secret-age.sock
           volumeMounts:
             - name: providers-socket-dir
               mountPath: /csi
             - name: master-key-secret
-              mountPath: /etc/age-vault/secrets/master-key
+              mountPath: /etc/csi-secret-age/secrets/master-key
               readOnly: true
       volumes:
         - name: providers-socket-dir
@@ -288,11 +288,11 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: age-vault-admin
+  name: csi-secret-age-admin
   namespace: %s
 spec:
   selector:
-    app: age-vault-csi
+    app: csi-secret-age
   ports:
     - port: 8090
       targetPort: 8090
@@ -303,8 +303,8 @@ spec:
 
 	kubectlApply(t, manifests)
 
-	t.Log("Waiting for Age Vault CSI DaemonSet to be ready...")
-	waitForDaemonSetPods(t, namespace, "app=age-vault-csi", 120*time.Second)
+	t.Log("Waiting for CSI Secret Age DaemonSet to be ready...")
+	waitForDaemonSetPods(t, namespace, "app=csi-secret-age", 120*time.Second)
 }
 
 // deployDriverViaHelm deploys the CSI provider using the Helm chart with KMS values.
@@ -331,7 +331,7 @@ func deployDriverViaHelm(t *testing.T) {
 		"--timeout", "2m",
 	)
 
-	t.Log("Waiting for Age Vault CSI DaemonSet to be ready...")
+	t.Log("Waiting for CSI Secret Age DaemonSet to be ready...")
 	waitForDaemonSetPods(t, namespace, "app.kubernetes.io/name=csi-secret-age", 120*time.Second)
 }
 
@@ -356,9 +356,9 @@ func verifyKMSEnvVars(t *testing.T) {
 	podName := getDriverPodName(t, "app.kubernetes.io/name=csi-secret-age")
 
 	expectedVars := map[string]string{
-		"KMS_CIPHERTEXT_FILE":      "/etc/age-vault/secrets/aws-kms/ciphertext",
-		"GCP_KMS_KEY_NAME_FILE":   "/etc/age-vault/secrets/gcp-kms/keyName",
-		"GCP_KMS_CIPHERTEXT_FILE": "/etc/age-vault/secrets/gcp-kms/ciphertext",
+		"KMS_CIPHERTEXT_FILE":      "/etc/csi-secret-age/secrets/aws-kms/ciphertext",
+		"GCP_KMS_KEY_NAME_FILE":   "/etc/csi-secret-age/secrets/gcp-kms/keyName",
+		"GCP_KMS_CIPHERTEXT_FILE": "/etc/csi-secret-age/secrets/gcp-kms/ciphertext",
 	}
 
 	for envVar, expectedValue := range expectedVars {
@@ -385,7 +385,7 @@ func verifyKMSEnvVars(t *testing.T) {
 }
 
 func runVolumeLifecycleTest(t *testing.T) {
-	t.Log("Verifying Age Vault CSI driver is registered and running...")
+	t.Log("Verifying CSI Secret Age driver is registered and running...")
 
 	cmd := exec.Command("kubectl", "get", "nodes")
 	out, err := cmd.CombinedOutput()
@@ -395,7 +395,7 @@ func runVolumeLifecycleTest(t *testing.T) {
 	t.Logf("Cluster nodes:\n%s", string(out))
 
 	t.Log("Checking CSI driver DaemonSet status...")
-	cmd = exec.Command("kubectl", "get", "pods", "-n", namespace, "-l", "app=age-vault-csi")
+	cmd = exec.Command("kubectl", "get", "pods", "-n", namespace, "-l", "app=csi-secret-age")
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("Failed to get CSI driver pods: %v", err)
@@ -403,7 +403,7 @@ func runVolumeLifecycleTest(t *testing.T) {
 	t.Logf("CSI driver pods:\n%s", string(out))
 
 	t.Log("Checking CSI driver logs...")
-	cmd = exec.Command("kubectl", "logs", "-n", namespace, "-l", "app=age-vault-csi", "-c", "csi-driver", "--tail=10")
+	cmd = exec.Command("kubectl", "logs", "-n", namespace, "-l", "app=csi-secret-age", "-c", "csi-driver", "--tail=10")
 	out, err = cmd.CombinedOutput()
 	if err != nil {
 		t.Logf("Warning: Could not get driver logs: %v", err)
@@ -411,7 +411,7 @@ func runVolumeLifecycleTest(t *testing.T) {
 		t.Logf("Driver logs:\n%s", string(out))
 	}
 
-	t.Log("Age Vault CSI driver is running successfully!")
+	t.Log("CSI Secret Age driver is running successfully!")
 }
 
 func runCmd(t *testing.T, name string, args ...string) {
@@ -505,7 +505,7 @@ metadata:
 apiVersion: secrets-store.csi.x-k8s.io/v1
 kind: SecretProviderClass
 metadata:
-  name: age-vault-spc
+  name: csi-secret-age-spc
   namespace: %s
 spec:
   provider: %s
@@ -545,7 +545,7 @@ spec:
       driver: secrets-store.csi.k8s.io
       readOnly: true
       volumeAttributes:
-        secretProviderClass: age-vault-spc
+        secretProviderClass: csi-secret-age-spc
 `, testPodName, testNamespace, mountPath)
 	kubectlApply(t, podManifest)
 
@@ -560,7 +560,7 @@ spec:
 	t.Log("Secret mounting validation test passed!")
 }
 
-// getDriverPodName returns the name of a running age-vault-csi pod matching the selector.
+// getDriverPodName returns the name of a running csi-secret-age pod matching the selector.
 func getDriverPodName(t *testing.T, selector string) string {
 	t.Helper()
 	cmd := exec.Command("kubectl", "get", "pod", "-n", namespace, "-l", selector, "-o", "jsonpath={.items[0].metadata.name}")
@@ -580,7 +580,7 @@ func addSecretViaAdminAPI(t *testing.T, secretPath, value, namespaces, serviceAc
 
 	// Start port-forward in background (service-based, works with hostNetwork pods)
 	go func() {
-		cmd := exec.CommandContext(ctx, "kubectl", "port-forward", "-n", namespace, "svc/age-vault-admin", "8090:8090")
+		cmd := exec.CommandContext(ctx, "kubectl", "port-forward", "-n", namespace, "svc/csi-secret-age-admin", "8090:8090")
 		if err := cmd.Run(); err != nil && ctx.Err() == nil {
 			t.Logf("Port-forward error: %v", err)
 		}

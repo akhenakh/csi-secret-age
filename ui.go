@@ -55,7 +55,7 @@ const adminHTML = `
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Age Vault Admin</title>
+    <title>CSI Secret Age Admin</title>
     <style>
         body { font-family: sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; }
         a { text-decoration: none; color: #007bff; }

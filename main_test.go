@@ -278,7 +278,7 @@ func TestProviderServer_Version(t *testing.T) {
 	resp, err := server.Version(context.Background(), &v1alpha1.VersionRequest{})
 	require.NoError(t, err)
 	assert.Equal(t, "v1alpha1", resp.Version)
-	assert.Equal(t, "age-vault-provider", resp.RuntimeName)
+	assert.Equal(t, "csi-secret-age-provider", resp.RuntimeName)
 }
 
 func TestVaultManager_LockedState(t *testing.T) {
