@@ -35,10 +35,17 @@ func main() {
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if secret.Enabled() {
-		logger.Info("runtime/secret experiment is enabled. Memory wiping active.")
+	// secret.Enabled() only reports true while Do is on the call stack, so it
+	// must be probed from inside Do. A direct call from main always returns
+	// false even when the experiment is compiled in and active.
+	var memoryWipingActive bool
+	secret.Do(func() {
+		memoryWipingActive = secret.Enabled()
+	})
+	if memoryWipingActive {
+		logger.Info("runtime/secret active: temporary secret memory will be wiped.")
 	} else {
-		logger.Warn("runtime/secret experiment is NOT enabled. Plaintext secrets may linger in heap memory.")
+		logger.Warn("runtime/secret NOT active (experiment disabled or unsupported platform). Plaintext secrets may linger in heap memory.")
 	}
 
 	var k8sClient kubernetes.Interface
