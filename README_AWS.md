@@ -52,17 +52,8 @@ stringData:
 
 ### 4. Configure the DaemonSet
 
-Add the `KMS_CIPHERTEXT` env var to the DaemonSet container (see `deploy.yaml` for the commented-out example):
 
-```yaml
-- name: KMS_CIPHERTEXT
-  valueFrom:
-    secretKeyRef:
-      name: age-kms-ciphertext
-      key: ciphertext
-```
-
-Alternatively, read the ciphertext from a mounted file using `KMS_CIPHERTEXT_FILE` (preferred — avoids exposing the value in environment variables):
+Read the ciphertext from a mounted file using `KMS_CIPHERTEXT_FILE` (preferred — avoids exposing the value in environment variables):
 
 ```yaml
 volumes:
@@ -117,6 +108,11 @@ The DaemonSet pods need `kms:Decrypt` on the KMS key:
 ```
 
 Attach this policy via IRSA (IAM Roles for Service Accounts) or the node's instance profile.
+
+```
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::<acct>:role/csi-secret-age-kms
+```
 
 ## Fallback Behavior
 

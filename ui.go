@@ -149,14 +149,6 @@ const adminHTML = `
                     <div class="detail-label">Value</div>
                     <div class="detail-value masked">********</div>
                 </div>
-                <div class="detail-row">
-                    <div class="detail-label">Allowed Namespaces</div>
-                    <div class="detail-value">{{.Entry.Namespaces}}</div>
-                </div>
-                <div class="detail-row">
-                    <div class="detail-label">Allowed Service Accounts</div>
-                    <div class="detail-value">{{.Entry.ServiceAccounts}}</div>
-                </div>
                 <div style="margin-top: 20px;">
                     <form action="/delete" method="POST" style="display: inline;" onsubmit="return confirm('Delete this secret?');">
                         <input type="hidden" name="path" value="{{.EntryPath}}">
@@ -181,16 +173,13 @@ const adminHTML = `
             {{if .Folder}}
             <div class="detail-box" style="margin-bottom: 20px;">
                 <div class="detail-row">
-                    <div class="detail-label">Folder ACLs</div>
-                    <div class="detail-value">
-                        <strong>Allowed Namespaces:</strong> {{.Folder.Namespaces}}<br>
-                        <strong>Allowed Service Accounts:</strong> {{.Folder.ServiceAccounts}}
-                    </div>
+                    <div class="detail-label">Folder Info</div>
+                    <div class="detail-value">Path: {{.Folder.Path}}</div>
                 </div>
                 <div style="margin-top: 10px;">
-                    <form action="/delete" method="POST" style="display: inline;" onsubmit="return confirm('Delete this folder ACL?');">
+                    <form action="/delete" method="POST" style="display: inline;" onsubmit="return confirm('Delete this folder?');">
                         <input type="hidden" name="path" value="{{.CurrentPath}}">
-                        <button type="submit" class="delete">Delete Folder ACLs</button>
+                        <button type="submit" class="delete">Delete Folder</button>
                     </form>
                 </div>
             </div>
@@ -209,7 +198,6 @@ const adminHTML = `
                     <a href="/entry?path={{.Path}}" class="tree-name">
                         <span class="tree-icon">&#128196;</span>{{.Name}}
                     </a>
-                    <span class="entry-meta">{{.Namespaces}} / {{.ServiceAccounts}}</span>
                 </li>
                 {{end}}
                 {{if and (not .Folders) (not .Entries) (not .Folder)}}
@@ -229,20 +217,12 @@ const adminHTML = `
         <div class="form-group">
             <label>
                 <input type="checkbox" name="is_folder" value="true">
-                Create as folder (no secret value, only ACLs)
+                Create as folder (no secret value, acts as a namespace grouping only)
             </label>
         </div>
         <div class="form-group" id="value-group">
             <label>Secret Value</label>
             <textarea name="value" rows="4" placeholder="Will be securely encrypted. Cannot be read back from the UI."></textarea>
-        </div>
-        <div class="form-group">
-            <label>Allowed Namespaces (comma-separated, use * for all)</label>
-            <input type="text" name="namespaces" value="*">
-        </div>
-        <div class="form-group">
-            <label>Allowed Service Accounts (comma-separated, use * for all)</label>
-            <input type="text" name="service_accounts" value="*">
         </div>
         <button type="submit">Save</button>
     </form>
@@ -264,10 +244,8 @@ const adminHTML = `
 `
 
 type UISecret struct {
-	Path            string
-	Name            string
-	Namespaces      string
-	ServiceAccounts string
+	Path string
+	Name string
 }
 
 type UIFolder struct {
@@ -276,9 +254,7 @@ type UIFolder struct {
 }
 
 type UIFolderDetail struct {
-	Path            string
-	Namespaces      string
-	ServiceAccounts string
+	Path string
 }
 
 type Breadcrumb struct {
@@ -375,10 +351,8 @@ func buildTreeState(tree *VaultTree, currentPath string, entryPath string, userP
 		if node, ok := tree.Nodes[entryPath]; ok && !node.IsFolder {
 			if userPerms == nil || userPerms.CanRead(entryPath) {
 				state.Entry = UISecret{
-					Path:            entryPath,
-					Name:            path.Base(entryPath),
-					Namespaces:      strings.Join(node.AllowedNamespaces, ", "),
-					ServiceAccounts: strings.Join(node.AllowedServiceAccounts, ", "),
+					Path: entryPath,
+					Name: path.Base(entryPath),
 				}
 			}
 		}
@@ -438,9 +412,7 @@ func buildTreeState(tree *VaultTree, currentPath string, entryPath string, userP
 	if node, ok := tree.Nodes[currentPath]; ok && node.IsFolder {
 		if userPerms == nil || userPerms.CanRead(currentPath) {
 			state.Folder = &UIFolderDetail{
-				Path:            currentPath,
-				Namespaces:      strings.Join(node.AllowedNamespaces, ", "),
-				ServiceAccounts: strings.Join(node.AllowedServiceAccounts, ", "),
+				Path: currentPath,
 			}
 		}
 	}
@@ -471,10 +443,8 @@ func buildTreeState(tree *VaultTree, currentPath string, entryPath string, userP
 		if len(segments) == 1 && !node.IsFolder {
 			// It's a leaf entry
 			state.Entries = append(state.Entries, UISecret{
-				Path:            vaultPath,
-				Name:            name,
-				Namespaces:      strings.Join(node.AllowedNamespaces, ", "),
-				ServiceAccounts: strings.Join(node.AllowedServiceAccounts, ", "),
+				Path: vaultPath,
+				Name: name,
 			})
 		} else {
 			// It's a folder (either has more segments, or is explicitly a folder node)
@@ -622,22 +592,6 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 			isFolder = r.FormValue("is_folder") == "true"
 			value := r.FormValue("value")
 
-			nsParts := strings.Split(r.FormValue("namespaces"), ",")
-			var namespaces []string
-			for _, ns := range nsParts {
-				if trimmed := strings.TrimSpace(ns); trimmed != "" {
-					namespaces = append(namespaces, trimmed)
-				}
-			}
-
-			saParts := strings.Split(r.FormValue("service_accounts"), ",")
-			var serviceAccounts []string
-			for _, sa := range saParts {
-				if trimmed := strings.TrimSpace(sa); trimmed != "" {
-					serviceAccounts = append(serviceAccounts, trimmed)
-				}
-			}
-
 			if updatePath == "" {
 				updateErr = fmt.Errorf("path is required")
 				return
@@ -662,10 +616,8 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 				}
 
 				tree.Nodes[updatePath] = &VaultNode{
-					Value:                  value,
-					IsFolder:               isFolder,
-					AllowedNamespaces:      namespaces,
-					AllowedServiceAccounts: serviceAccounts,
+					Value:    value,
+					IsFolder: isFolder,
 				}
 				return nil
 			})

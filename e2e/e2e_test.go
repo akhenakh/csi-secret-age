@@ -597,7 +597,7 @@ spec:
 
 	// 3. Add test secret via the admin API
 	t.Log("Adding test secret via admin API...")
-	addSecretViaAdminAPI(t, adminJWT, "/e2e/test-secret", "e2e-test-secret-value", "*", "*")
+		addSecretViaAdminAPI(t, adminJWT, "/e2e/test-secret", "e2e-test-secret-value")
 
 	// Wait for provider to be fully registered
 	t.Log("Waiting for provider registration...")
@@ -653,7 +653,7 @@ func getDriverPodName(t *testing.T, selector string) string {
 }
 
 // addSecretViaAdminAPI adds a secret to the vault via its HTTP admin API
-func addSecretViaAdminAPI(t *testing.T, adminJWT, secretPath, value, namespaces, serviceAccounts string) {
+func addSecretViaAdminAPI(t *testing.T, adminJWT, secretPath, value string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -673,8 +673,8 @@ func addSecretViaAdminAPI(t *testing.T, adminJWT, secretPath, value, namespaces,
 	// Try to add the secret via the admin API
 	var lastErr error
 	for i := 0; i < 5; i++ {
-		data := fmt.Sprintf("path=%s&value=%s&namespaces=%s&service_accounts=%s",
-			secretPath, value, namespaces, serviceAccounts)
+		data := fmt.Sprintf("path=%s&value=%s",
+			secretPath, value)
 
 		client := &http.Client{Timeout: 5 * time.Second}
 		req, err := http.NewRequest("POST", "http://localhost:8090/update", strings.NewReader(data))
@@ -819,9 +819,9 @@ metadata:
   name: %s
 `, deniedNS))
 
-	// 2. Add a test secret via admin API (wildcard per-node ACLs — namespace_permissions filters)
+	// 2. Add a test secret via admin API (access controlled by namespace_permissions only)
 	t.Log("Adding test secret via admin API...")
-	addSecretViaAdminAPI(t, adminJWT, secretPath, secretValue, "*", "*")
+	addSecretViaAdminAPI(t, adminJWT, secretPath, secretValue)
 
 	time.Sleep(3 * time.Second)
 

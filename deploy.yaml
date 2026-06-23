@@ -1,25 +1,26 @@
-apiVersion: v1
-kind: Secret
-metadata:
-  name: age-master-key
-  namespace: kube-system
-stringData:
-  # Generated using `age-keygen`
-  key.txt: "AGE-SECRET-KEY-1..."
----
-# Optional: AWS KMS encrypted age master key ciphertext.
+# Master key (file/env) mode. Uncomment to use a raw age key instead of KMS.
+# apiVersion: v1
+# kind: Secret
+# metadata:
+#   name: age-master-key
+#   namespace: kube-system
+# stringData:
+#   # Generated using `age-keygen`
+#   key.txt: "AGE-SECRET-KEY-1..."
+# ---
+# AWS KMS encrypted age master key ciphertext.
 # When using AWS KMS, set KMS_CIPHERTEXT_FILE instead of MASTER_KEY_FILE
 # and build the image with --build-arg KMS_ENABLED=true.
 # The ciphertext is generated with:
 #   aws kms encrypt --key-id <arn> --plaintext fileb://key.txt --output text --query CiphertextBlob
-# apiVersion: v1
-# kind: Secret
-# metadata:
-#   name: age-kms-ciphertext
-#   namespace: kube-system
-# stringData:
-#   ciphertext: "<base64-encoded-blob>"
-# ---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: age-kms-ciphertext
+  namespace: kube-system
+stringData:
+  ciphertext: "AQICAHj5kWTjRl/89T1Mh9QR5Pv2meGNZVsJaJyWWUgvMXGstwF+EbNgIGiOWZXu3tCTkhSqAAABJDCCASAGCSqGSIb3DQEHBqCCAREwggENAgEAMIIBBgYJKoZIhvcNAQcBMB4GCWCGSAFlAwQBLjARBAwD2GIhH9AnD0zu3pcCARCAgdivYgXCgniqpcoebQSGjXsTSkEG78NVh5vojBIGccOuvTb22lgKpWG5NvHIbL0NZ9wXlNqg4Lh4PErEJlWNNg4zsNtW1HlCYIHZ6Cfok6LOvBntDNiAtOp6PexHMpmEqmYica/8lr6JwD+as3L/HIqh5aJWUwLb3TtYsue2VLw7znIFrkzt2/+5EfC8XFwxROI+qwaBc0D4He3td32MQjs1vnWPH2Vi9bvMPcNQGRlVaKcXTcSB753xvNbb1cjLTref8CbR7z+7F7NGh5pe/+Pq1SHUKZi95U4="
+---
 # Optional: GCP KMS encrypted age master key ciphertext.
 # When using GCP KMS, set GCP_KMS_KEY_NAME_FILE and GCP_KMS_CIPHERTEXT_FILE
 # instead of MASTER_KEY_FILE and build with --build-arg GCPKMS_ENABLED=true.
@@ -120,13 +121,16 @@ spec:
       hostNetwork: true
       containers:
         - name: csi-driver
-          image: csi-secret-age:latest
+          image: ghcr.io/akhenakh/csi-secret-age:v0.2.1
+          # Always pull while iterating; re-pin to an immutable @sha256 digest once stable.
+          imagePullPolicy: Always
           env:
-            - name: MASTER_KEY_FILE
-              value: /etc/csi-secret-age/secrets/master-key/key.txt
-            # Uncomment to use AWS KMS instead of MASTER_KEY_FILE:
-            # - name: KMS_CIPHERTEXT_FILE
-            #   value: /etc/csi-secret-age/secrets/kms/ciphertext
+            # - name: MASTER_KEY_FILE
+            #   value: /etc/csi-secret-age/secrets/master-key/key.txt
+            # AWS KMS: the secret is mounted at /etc/csi-secret-age/secrets/kms
+            # and its "ciphertext" key becomes the file below.
+            - name: KMS_CIPHERTEXT_FILE
+              value: /etc/csi-secret-age/secrets/kms/ciphertext
             # Uncomment to use GCP KMS instead of MASTER_KEY_FILE:
             # - name: GCP_KMS_KEY_NAME_FILE
             #   value: /etc/csi-secret-age/secrets/gcpkms/keyName
@@ -143,8 +147,8 @@ spec:
               mountPath: /csi
             - name: perms-config
               mountPath: /etc/csi-secret-age
-            - name: master-key-secret
-              mountPath: /etc/csi-secret-age/secrets/master-key
+            - name: kms-ciphertext-secret
+              mountPath: /etc/csi-secret-age/secrets/kms
               readOnly: true
             - name: jwt-public-key-secret
               mountPath: /etc/csi-secret-age/secrets/jwt
@@ -157,9 +161,9 @@ spec:
         - name: perms-config
           configMap:
             name: csi-secret-age-perms
-        - name: master-key-secret
+        - name: kms-ciphertext-secret
           secret:
-            secretName: age-master-key
+            secretName: age-kms-ciphertext
         - name: jwt-public-key-secret
           secret:
             secretName: jwt-public-key

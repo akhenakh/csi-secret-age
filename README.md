@@ -9,7 +9,7 @@ No external databases or heavy Vault installations are required.
 ## Features
 * **Zero Infrastructure:** State is saved as an encrypted blob inside a standard Kubernetes Secret. Backing up your cluster naturally backs up your secrets.
 * **Cold Start / Lock Mode:** The provider starts in a "Locked" state. It can be unlocked manually via the Web UI, via an environment variable, or seamlessly via Cloud KMS integrations.
-* **Two-Layer Access Control:** Per-secret ACLs restrict by namespace and service account. Per-namespace path-pattern policies restrict entire namespaces or specific workloads to only the subtrees they need.
+* **Two-Layer Access Control:** Per-namespace path-pattern policies restrict which namespaces or specific workloads can access which subtrees. Web UI JWT permissions restrict which users can manage which parts of the tree.
 * **Web UI JWT Permissions:** In production (non-dev mode), the Web UI can enforce JWT-based RBAC so users only see and manage the parts of the tree they own.
 * **Modern Cryptography:** Powered by the modern, secure `filippo.io/age` encryption standard.
 * **Cloud KMS Ready:** Extensible `MasterKeyProvider` interface allows fetching the master unlock key from AWS KMS, GCP KMS, or Azure KeyVault.
@@ -111,9 +111,7 @@ containers:
 
 ## Namespace & Workload Read Restrictions
 
-For the workloads to read some parts of the secrets tree, it must be authorized, per namespace or namespace & SA.
-
-You can define **namespace-level path-pattern policies** that restrict which subtrees a namespace or workload can read. This is configured in `perm.yaml`, under the `namespace_permissions` key.
+For workloads to read secrets from the vault, they must be authorized via **namespace-level path-pattern policies** configured in `perm.yaml` under the `namespace_permissions` key.
 
 | Identity | Can read |
 |---|---|
@@ -147,15 +145,6 @@ data:
 ```
 
 Service-account-specific keys (`namespace/sa`) **take precedence over** namespace-only keys (`namespace`). If neither matches, access is denied.
-
-### When to Use Each Layer
-
-| Layer | Scope | Best For |
-|---|---|---|
-| **Per-Secret ACLs** (`AllowedNamespaces`, `AllowedServiceAccounts`) | One secret at a time | Fine-grained: "only the `db-client` SA in `prod` can read this password" |
-| **Namespace Policies** (`namespace_permissions`) | Entire subtree | Defense in depth: "the `staging` namespace can only ever see `/staging/*`, no matter what a per-secret ACL says" |
-
-Both layers must pass for a secret to be mounted. If either denies, the request is rejected.
 
 ## Web UI User Permissions
 You can give permissions to users to access parts of the secret tree, write/update only.
@@ -280,7 +269,7 @@ When `PERM_CONFIG_PATH` and `JWT_PUBLIC_KEY` are configured, the UI's built-in J
 
 Once unlocked, the Web UI at http://localhost:8090 becomes your control plane.
 
-* **View ACLs:** See which namespaces and service accounts have access to which vault paths.
+* **View the tree:** Browse the folder-based hierarchy and click on entries to see their vault path.
 * **Blind-Write Interface:** For security, secret values cannot be read back from the UI. They are displayed as `********`.
 * **Add/Update Secrets:** Use the form to insert new secrets or update existing ones. Example path: `/db/postgres/password`.
 * **Offline Backups:** Admins can click **Export Backup (.age)** to download the entire vault securely. Because the export is `age`-encrypted, it is completely safe to store in version control, S3, or a local hard drive.
@@ -315,7 +304,7 @@ metadata:
   name: my-secure-app
   namespace: production
 spec:
-  serviceAccountName: db-client # Must match the ACL in the Vault Tree!
+  serviceAccountName: db-client
   containers:
   - name: app
     image: alpine
@@ -335,7 +324,7 @@ spec:
 
 When the pod starts:
 1. If the vault is locked, the Pod will wait safely in `ContainerCreating`.
-2. Once unlocked, the CSI driver verifies that `production` and `db-client` are allowed to read `/db/postgres/password`.
+2. Once unlocked, the CSI driver verifies that the pod's namespace and service account are authorized by the `namespace_permissions` policy to read `/db/postgres/password`.
 3. If successful, the plaintext secret is mounted as a file at `/mnt/secrets/db-pass`.
 
 ## End-to-End Testing
@@ -393,7 +382,7 @@ This completely prevents secrets from lingering in memory space, protecting agai
 2. **Unlocking:** An administrator provides the Master Key via the local Web UI, or the system auto-fetches it via a Cloud KMS plugin.
 3. **Administration:** Using the local Web UI, administrators can blind-write new secrets and define Access Control Lists (ACLs). The Web UI masks all values and strips plaintext before rendering HTML to prevent memory leaks.
 4. **Encryption:** The Provider serializes and encrypts the tree using the `age` public key, storing it in `kube-system/csi-secret-age-backend`.
-5. **Concurrent-Safe Writes:** The Web UI and any write path use optimistic locking (`ResourceVersion`) on the Kubernetes Secret. If multiple pods (or multiple users) try to update the vault simultaneously, the first one succeeds and the others automatically retry their read-modify-write cycle up to 5 times. This prevents lost updates when running multiple DaemonSet replicas per node.
+5. **Concurrent-Safe Writes:** The Web UI and any write path use optimistic locking (`ResourceVersion`) on the Kubernetes Secret. If multiple pods (or multiple users) try to update the vault simultaneously, the first one succeeds and the others automatically retry their read-modify-write cycle up to 5 times. This prevents lost updates when running multiple DaemonSet replicas per cluster.
 6. **Mounting:** When a Pod requests a secret, the Provider dynamically decrypts the Vault Tree *in-memory*, evaluates the ACL against the requesting Pod's Namespace/ServiceAccount, and securely mounts the secret into the Pod.
 
 ```mermaid
@@ -439,3 +428,8 @@ flowchart TB
     RV -. "Conflict = Retry" .-> DS_C
 ```
 
+## TODO
+- [] read sub from header if the gw is doing the auth (less safe)
+- tls
+- JWKS
+- env export

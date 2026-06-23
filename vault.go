@@ -21,28 +21,8 @@ import (
 )
 
 type VaultNode struct {
-	Value                  string   `json:"value"`
-	IsFolder               bool     `json:"isFolder"`
-	AllowedNamespaces      []string `json:"allowedNamespaces"`
-	AllowedServiceAccounts []string `json:"allowedServiceAccounts"`
-}
-
-func (n *VaultNode) CanAccess(namespace, sa string) bool {
-	nsMatch := false
-	for _, allowed := range n.AllowedNamespaces {
-		if allowed == namespace || allowed == "*" {
-			nsMatch = true
-			break
-		}
-	}
-	saMatch := false
-	for _, allowed := range n.AllowedServiceAccounts {
-		if allowed == sa || allowed == "*" {
-			saMatch = true
-			break
-		}
-	}
-	return nsMatch && saMatch
+	Value    string `json:"value"`
+	IsFolder bool   `json:"isFolder"`
 }
 
 type VaultTree struct {

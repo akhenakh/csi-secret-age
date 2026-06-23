@@ -79,12 +79,6 @@ func (s *ProviderServer) Mount(ctx context.Context, req *v1alpha1.MountRequest) 
 				return
 			}
 
-			if !node.CanAccess(podNamespace, podSA) {
-				s.logger.Warn("Access denied", "path", vaultPath, "namespace", podNamespace, "sa", podSA)
-				mountErr = fmt.Errorf("access denied to path %s", vaultPath)
-				return
-			}
-
 			if !s.permMgr.CanAccess(podNamespace, podSA, vaultPath) {
 				s.logger.Warn("Namespace access denied", "path", vaultPath, "namespace", podNamespace, "sa", podSA)
 				mountErr = fmt.Errorf("access denied to path %s", vaultPath)

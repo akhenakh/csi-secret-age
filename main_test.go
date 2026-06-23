@@ -42,64 +42,6 @@ func getTestLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func TestVaultNode_CanAccess(t *testing.T) {
-	tests := []struct {
-		name          string
-		node          VaultNode
-		testNamespace string
-		testSA        string
-		want          bool
-	}{
-		{
-			name: "Wildcard allows everything",
-			node: VaultNode{
-				AllowedNamespaces:      []string{"*"},
-				AllowedServiceAccounts: []string{"*"},
-			},
-			testNamespace: "random-ns",
-			testSA:        "random-sa",
-			want:          true,
-		},
-		{
-			name: "Specific namespace and SA matches",
-			node: VaultNode{
-				AllowedNamespaces:      []string{"prod"},
-				AllowedServiceAccounts: []string{"db-client"},
-			},
-			testNamespace: "prod",
-			testSA:        "db-client",
-			want:          true,
-		},
-		{
-			name: "Namespace mismatch denies access",
-			node: VaultNode{
-				AllowedNamespaces:      []string{"prod"},
-				AllowedServiceAccounts: []string{"db-client"},
-			},
-			testNamespace: "staging",
-			testSA:        "db-client",
-			want:          false,
-		},
-		{
-			name: "ServiceAccount mismatch denies access",
-			node: VaultNode{
-				AllowedNamespaces:      []string{"prod"},
-				AllowedServiceAccounts: []string{"db-client"},
-			},
-			testNamespace: "prod",
-			testSA:        "web-client",
-			want:          false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.node.CanAccess(tt.testNamespace, tt.testSA)
-			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
 func TestVaultManager_EncryptAndLoad(t *testing.T) {
 	ctx := context.Background()
 	fakeClient := fake.NewSimpleClientset()
@@ -126,9 +68,7 @@ func TestVaultManager_EncryptAndLoad(t *testing.T) {
 	tree := &VaultTree{
 		Nodes: map[string]*VaultNode{
 			"/test/secret": {
-				Value:                  "my-super-secret",
-				AllowedNamespaces:      []string{"*"},
-				AllowedServiceAccounts: []string{"*"},
+				Value: "my-super-secret",
 			},
 		},
 	}
@@ -171,14 +111,10 @@ func TestProviderServer_Mount(t *testing.T) {
 	tree := &VaultTree{
 		Nodes: map[string]*VaultNode{
 			"/db/pass": {
-				Value:                  "db-secret-value",
-				AllowedNamespaces:      []string{"prod"},
-				AllowedServiceAccounts: []string{"app"},
+				Value: "db-secret-value",
 			},
 			"/api/key": {
-				Value:                  "api-secret-value",
-				AllowedNamespaces:      []string{"*"},
-				AllowedServiceAccounts: []string{"*"},
+				Value: "api-secret-value",
 			},
 		},
 	}
@@ -218,18 +154,6 @@ func TestProviderServer_Mount(t *testing.T) {
 				"db-password": "db-secret-value",
 				"api-key":     "api-secret-value",
 			},
-		},
-		{
-			name:        "Access Denied due to wrong namespace",
-			req:         makeMountReq("staging", "app", "db-password=/db/pass"),
-			expectErr:   true,
-			errContains: "access denied to path /db/pass",
-		},
-		{
-			name:        "Access Denied due to wrong service account",
-			req:         makeMountReq("prod", "web", "db-password=/db/pass"),
-			expectErr:   true,
-			errContains: "access denied to path /db/pass",
 		},
 		{
 			name:        "Missing secret in vault",
@@ -639,14 +563,10 @@ func TestProviderServer_Mount_NamespacePermissions(t *testing.T) {
 	tree := &VaultTree{
 		Nodes: map[string]*VaultNode{
 			"/staging/db/pass": {
-				Value:                  "staging-db-secret",
-				AllowedNamespaces:      []string{"*"},
-				AllowedServiceAccounts: []string{"*"},
+				Value: "staging-db-secret",
 			},
 			"/prod/api/key": {
-				Value:                  "prod-api-secret",
-				AllowedNamespaces:      []string{"*"},
-				AllowedServiceAccounts: []string{"*"},
+				Value: "prod-api-secret",
 			},
 		},
 	}
@@ -789,9 +709,7 @@ func buildBenchmarkTree(n int) *VaultTree {
 	for i := 0; i < n; i++ {
 		path := fmt.Sprintf("/app/%d/secret", i)
 		tree.Nodes[path] = &VaultNode{
-			Value:                  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-			AllowedNamespaces:      []string{"prod"},
-			AllowedServiceAccounts: []string{"app"},
+			Value: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
 		}
 	}
 	return tree
@@ -886,9 +804,7 @@ func TestVaultManager_UpdateVault(t *testing.T) {
 	// Initial update should create the secret
 	err := mgr.UpdateVault(ctx, func(tree *VaultTree) error {
 		tree.Nodes["/db/pass"] = &VaultNode{
-			Value:                  "secret",
-			AllowedNamespaces:      []string{"*"},
-			AllowedServiceAccounts: []string{"*"},
+			Value: "secret",
 		}
 		return nil
 	})
@@ -924,7 +840,7 @@ func TestVaultManager_UpdateVault_Conflict(t *testing.T) {
 
 	// Prepopulate
 	tree := &VaultTree{Nodes: map[string]*VaultNode{
-		"/db/pass": {Value: "initial", AllowedNamespaces: []string{"*"}, AllowedServiceAccounts: []string{"*"}},
+		"/db/pass": {Value: "initial"},
 	}}
 	require.NoError(t, mgr.EncryptAndSave(ctx, tree))
 
