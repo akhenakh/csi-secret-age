@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 )
 
 // Config represents environment configurations.
@@ -28,9 +29,20 @@ type Config struct {
 	PermConfigPath string `env:"PERM_CONFIG_PATH"`
 	// JWTPublicKey is the PEM-encoded RSA public key used to validate JWT tokens
 	// for the permission system. Use JWTPublicKeyFile to read from a file instead.
+	// Mutually exclusive with JWT_JWKS_URL / JWT_JWKS / JWT_JWKS_FILE.
 	JWTPublicKey     string `env:"JWT_PUBLIC_KEY"`
 	JWTPublicKeyFile string `env:"JWT_PUBLIC_KEY_FILE"`
 	JWTUserClaim     string `env:"JWT_USER_CLAIM" envDefault:"sub"`
+
+	// JWT_JWKS_URL fetches a JSON Web Key Set from an HTTPS (or HTTP) URL.
+	// The key identified by the token's `kid` header is used for RS256 validation.
+	// Mutually exclusive with JWT_PUBLIC_KEY / JWT_JWKS / JWT_JWKS_FILE.
+	JWTJWKSURL string `env:"JWT_JWKS_URL"`
+	// JWTJWKS is an inline JSON Web Key Set. Use JWT_JWKS_FILE to read from a file.
+	JWTJWKS     string `env:"JWT_JWKS"`
+	JWTJWKSFile string `env:"JWT_JWKS_FILE"`
+	// JWTJWKSRefreshInterval controls how often the JWKS URL cache is refreshed.
+	JWTJWKSRefreshInterval time.Duration `env:"JWT_JWKS_REFRESH_INTERVAL" envDefault:"15m"`
 
 	// KMSCiphertext is the base64-encoded ciphertext blob from AWS KMS encrypt.
 	// When set and compiled with the 'kms' build tag, the provider fetches the
@@ -93,6 +105,7 @@ func (c *Config) ResolveSecrets() error {
 	}{
 		{"MASTER_KEY", &c.MasterKey, c.MasterKeyFile},
 		{"JWT_PUBLIC_KEY", &c.JWTPublicKey, c.JWTPublicKeyFile},
+		{"JWT_JWKS", &c.JWTJWKS, c.JWTJWKSFile},
 		{"KMS_CIPHERTEXT", &c.KMSCiphertext, c.KMSCiphertextFile},
 		{"GCP_KMS_KEY_NAME", &c.GCPKMSKeyName, c.GCPKMSKeyNameFile},
 		{"GCP_KMS_CIPHERTEXT", &c.GCPKMSCiphertext, c.GCPKMSCiphertextFile},

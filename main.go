@@ -83,7 +83,12 @@ func main() {
 	var permMgr *PermissionManager
 	if cfg.PermConfigPath != "" {
 		var errPerm error
-		permMgr, errPerm = NewPermissionManager(cfg.PermConfigPath, cfg.JWTPublicKey, cfg.JWTUserClaim)
+		permMgr, errPerm = NewPermissionManagerWithJWTConfig(cfg.PermConfigPath, JWTKeyConfig{
+			PublicKeyPEM:    cfg.JWTPublicKey,
+			JWKSURL:         cfg.JWTJWKSURL,
+			JWKSJSON:        cfg.JWTJWKS,
+			RefreshInterval: cfg.JWTJWKSRefreshInterval,
+		}, cfg.JWTUserClaim)
 		if errPerm != nil {
 			logger.Error("Failed to load permissions", "error", errPerm)
 			os.Exit(1)

@@ -5,12 +5,16 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -287,8 +291,8 @@ func TestCheckPathConflict(t *testing.T) {
 		wantError string
 	}{
 		{
-			name: "no conflict empty tree",
-			tree: &VaultTree{Nodes: map[string]*VaultNode{}},
+			name:    "no conflict empty tree",
+			tree:    &VaultTree{Nodes: map[string]*VaultNode{}},
 			newPath: "/nats/secret", isFolder: false,
 			wantError: "",
 		},
@@ -446,12 +450,12 @@ func TestPermissionManager_CanAccess(t *testing.T) {
 	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
 
 	tests := []struct {
-		name     string
-		yaml     string
-		ns       string
-		sa       string
-		path     string
-		want     bool
+		name string
+		yaml string
+		ns   string
+		sa   string
+		path string
+		want bool
 	}{
 		{
 			name: "empty namespace_permissions denies all",
@@ -460,7 +464,7 @@ user_permissions:
   userA:
     - "/nats/*"
 `,
-			ns:   "staging", sa: "web", path: "/any/secret",
+			ns: "staging", sa: "web", path: "/any/secret",
 			want: false,
 		},
 		{
@@ -470,7 +474,7 @@ namespace_permissions:
   staging:
     - "/staging/*"
 `,
-			ns:   "staging", sa: "web", path: "/staging/db/pass",
+			ns: "staging", sa: "web", path: "/staging/db/pass",
 			want: true,
 		},
 		{
@@ -480,7 +484,7 @@ namespace_permissions:
   staging:
     - "/staging/*"
 `,
-			ns:   "staging", sa: "web", path: "/prod/secret",
+			ns: "staging", sa: "web", path: "/prod/secret",
 			want: false,
 		},
 		{
@@ -490,7 +494,7 @@ namespace_permissions:
   staging:
     - "/staging/*"
 `,
-			ns:   "prod", sa: "app", path: "/any/secret",
+			ns: "prod", sa: "app", path: "/any/secret",
 			want: false,
 		},
 		{
@@ -500,7 +504,7 @@ namespace_permissions:
   staging/web:
     - "/staging/web/*"
 `,
-			ns:   "staging", sa: "web", path: "/staging/web/key",
+			ns: "staging", sa: "web", path: "/staging/web/key",
 			want: true,
 		},
 		{
@@ -512,7 +516,7 @@ namespace_permissions:
   staging/db:
     - "/staging/db/*"
 `,
-			ns:   "staging", sa: "db", path: "/staging/app/secret",
+			ns: "staging", sa: "db", path: "/staging/app/secret",
 			want: false,
 		},
 		{
@@ -522,7 +526,7 @@ namespace_permissions:
   staging/db:
     - "/staging/db/*"
 `,
-			ns:   "staging", sa: "db", path: "/staging/db/pass",
+			ns: "staging", sa: "db", path: "/staging/db/pass",
 			want: true,
 		},
 		{
@@ -701,6 +705,145 @@ func TestPermissionManager_ValidateJWT(t *testing.T) {
 
 	_, err = pm.ValidateJWT(noSubTokenString)
 	require.Error(t, err)
+}
+
+// helper to build a minimal JWKS JSON document from an RSA public key.
+func generateTestJWKS(t testing.TB, privateKey *rsa.PrivateKey, kid string) string {
+	t.Helper()
+	n := base64.RawURLEncoding.EncodeToString(privateKey.PublicKey.N.Bytes())
+	e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(privateKey.PublicKey.E)).Bytes())
+	jwks := map[string]any{
+		"keys": []map[string]any{
+			{"kty": "RSA", "kid": kid, "n": n, "e": e, "alg": "RS256", "use": "sig"},
+		},
+	}
+	b, err := json.Marshal(jwks)
+	require.NoError(t, err)
+	return string(b)
+}
+
+func signTestTokenWithKID(tb testing.TB, privateKey *rsa.PrivateKey, kid, user string) string {
+	tb.Helper()
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub": user,
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	token.Header["kid"] = kid
+	signed, err := token.SignedString(privateKey)
+	require.NoError(tb, err)
+	return signed
+}
+
+func TestPermissionManager_ValidateJWT_StaticJWKS(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - userH\n"), 0644))
+
+	jwksJSON := generateTestJWKS(t, privateKey, "key1")
+	pm, err := NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{JWKSJSON: jwksJSON}, "sub")
+	require.NoError(t, err)
+
+	validToken := signTestTokenWithKID(t, privateKey, "key1", "userH")
+	username, err := pm.ValidateJWT(validToken)
+	require.NoError(t, err)
+	assert.Equal(t, "userH", username)
+
+	// Token signed with an unknown kid should be rejected.
+	unknownKIDToken := signTestTokenWithKID(t, privateKey, "unknown", "userH")
+	_, err = pm.ValidateJWT(unknownKIDToken)
+	require.Error(t, err)
+
+	// Token without a kid should be rejected.
+	noKIDToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub": "userH",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	})
+	noKIDTokenString, err := noKIDToken.SignedString(privateKey)
+	require.NoError(t, err)
+	_, err = pm.ValidateJWT(noKIDTokenString)
+	require.Error(t, err)
+}
+
+func TestPermissionManager_ValidateJWT_JWKSURL(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	jwksJSON := generateTestJWKS(t, privateKey, "rotatable")
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(jwksJSON))
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - userH\n"), 0644))
+
+	pm, err := NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{
+		JWKSURL:         server.URL,
+		RefreshInterval: time.Hour, // long TTL to test caching
+	}, "sub")
+	require.NoError(t, err)
+
+	validToken := signTestTokenWithKID(t, privateKey, "rotatable", "userH")
+
+	username, err := pm.ValidateJWT(validToken)
+	require.NoError(t, err)
+	assert.Equal(t, "userH", username)
+
+	// A second validation should hit the in-memory cache, not the server.
+	_, err = pm.ValidateJWT(validToken)
+	require.NoError(t, err)
+	assert.Equal(t, 1, requests, "expected JWKS to be fetched exactly once within the cache TTL")
+
+	// With a zero TTL, every validation should refetch.
+	pmNoCache, err := NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{
+		JWKSURL:         server.URL,
+		RefreshInterval: 0,
+	}, "sub")
+	require.NoError(t, err)
+
+	requestsBefore := requests
+	_, err = pmNoCache.ValidateJWT(validToken)
+	require.NoError(t, err)
+	_, err = pmNoCache.ValidateJWT(validToken)
+	require.NoError(t, err)
+	assert.Equal(t, requestsBefore+2, requests, "expected a refetch per validation with zero TTL")
+}
+
+func TestPermissionManager_JWTKeyConfigConflicts(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+	jwksJSON := generateTestJWKS(t, privateKey, "key1")
+
+	tmpDir := t.TempDir()
+	permPath := filepath.Join(tmpDir, "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - userH\n"), 0644))
+
+	_, err = NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{
+		PublicKeyPEM: string(pubKeyPEM),
+		JWKSURL:      "http://example.com/jwks",
+	}, "sub")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "only one JWT key source")
+
+	_, err = NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{
+		PublicKeyPEM: string(pubKeyPEM),
+		JWKSJSON:     jwksJSON,
+	}, "sub")
+	require.Error(t, err)
+
+	_, err = NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{}, "sub")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "JWT public key or JWKS configuration is required")
 }
 
 // buildBenchmarkTree creates a tree with n nodes, each node is a leaf with a 64-byte secret.
@@ -954,8 +1097,15 @@ func TestConfig_ResolveSecrets(t *testing.T) {
 	assert.Equal(t, "base64-gcp-ciphertext", cfg.GCPKMSCiphertext)
 	assert.Contains(t, cfg.JWTPublicKey, "BEGIN PUBLIC KEY")
 
+	// JWKS file resolution
+	jwksFile := filepath.Join(tmpDir, "jwks.json")
+	require.NoError(t, os.WriteFile(jwksFile, []byte(`{"keys":[{"kty":"RSA","kid":"k1","n":"abc","e":"AQAB","alg":"RS256"}]}`), 0600))
+	cfgJWKS := Config{JWTJWKSFile: jwksFile}
+	require.NoError(t, cfgJWKS.ResolveSecrets())
+	assert.Contains(t, cfgJWKS.JWTJWKS, "keys")
+
 	cfg2 := Config{
-		MasterKey:    "inline-key",
+		MasterKey:     "inline-key",
 		KMSCiphertext: "inline-ct",
 	}
 	require.NoError(t, cfg2.ResolveSecrets())

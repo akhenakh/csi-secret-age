@@ -88,6 +88,11 @@ All sensitive configuration values support a `_FILE` suffix to read from a file 
 | `GCP_KMS_KEY_NAME` | `GCP_KMS_KEY_NAME_FILE` | GCP KMS CryptoKey resource name |
 | `GCP_KMS_CIPHERTEXT` | `GCP_KMS_CIPHERTEXT_FILE` | Base64-encoded GCP KMS ciphertext blob |
 | `JWT_PUBLIC_KEY` | `JWT_PUBLIC_KEY_FILE` | PEM-encoded RSA public key for JWT validation |
+| `JWT_JWKS_URL` | — | URL returning a JWKS JSON document |
+| `JWT_JWKS` | `JWT_JWKS_FILE` | Inline or file-based JWKS JSON document |
+| `JWT_JWKS_REFRESH_INTERVAL` | — | JWKS URL cache TTL (default `15m`) |
+
+`JWT_PUBLIC_KEY` and the JWKS options are **mutually exclusive** — configure one or the other.
 
 When both the inline and file variants are set, the **file takes precedence**. File contents are trimmed of leading/trailing whitespace.
 
@@ -212,9 +217,17 @@ env:
   # Option B: read from a mounted file (preferred for large PEM keys)
   # - name: JWT_PUBLIC_KEY_FILE
   #   value: /etc/csi-secret-age/jwt-public-key.pem
+  # Option C: use a JWKS endpoint (recommended when keys rotate)
+  # - name: JWT_JWKS_URL
+  #   value: "https://auth.example.com/.well-known/jwks.json"
   - name: JWT_USER_CLAIM
     value: "sub"  # default; the JWT claim to use as the username
 ```
+
+`JWT_PUBLIC_KEY`/`JWT_PUBLIC_KEY_FILE` and the JWKS options (`JWT_JWKS_URL`,
+`JWT_JWKS`/`JWT_JWKS_FILE`) are mutually exclusive. When using JWKS, tokens
+must include a `kid` header so the provider can select the correct signing
+key.
 
 When these are set, every request to the Web UI must include a valid `Authorization: Bearer <jwt>` token. The UI will then only show folders and secrets the user is allowed to read.
 
@@ -431,5 +444,5 @@ flowchart TB
 ## TODO
 - [] read sub from header if the gw is doing the auth (less safe)
 - tls
-- JWKS
 - env export
+- reload perm on the fly
