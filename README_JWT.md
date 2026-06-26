@@ -186,9 +186,89 @@ with a 401 Unauthorized response.
 
 ---
 
-## Trusted Header Authentication (OIDC Proxy Integration)
+## OIDC Access Tokens via UserInfo (Envoy Gateway OIDC — recommended for browsers)
 
-Some ingress/proxy implementations — notably Envoy Gateway OIDC — authenticate the user at the proxy layer and do **not** forward a JWT to the upstream. In those cases the upstream only receives an OAuth2 access token (often opaque) or session cookies.
+Browser SSO with Envoy Gateway OIDC is the common case, but the gateway does
+**not** hand a self-contained ID token (JWT) to the upstream — the ID token lives
+in an *encrypted* session cookie, and current Envoy versions cannot forward it as
+a header. What the gateway *can* forward (`forwardAccessToken: true`) is the
+OAuth2 **access token**, which for Google is *opaque* (not a JWT) and so cannot be
+verified locally.
+
+To handle this, `csi-secret-age` resolves an opaque `Authorization: Bearer`
+access token by calling the provider's **UserInfo endpoint**, which it discovers
+automatically from `JWT_ISSUER` (`{issuer}/.well-known/openid-configuration`).
+This is **provider-agnostic** — Google, Azure AD, Okta, Keycloak, Auth0, etc.
+
+```yaml
+env:
+  - name: JWT_ISSUER
+    value: "https://accounts.google.com"
+  - name: JWT_USER_CLAIM
+    value: "email"
+  # How long a resolved identity is cached (avoids a UserInfo round-trip per
+  # request). Defaults to 5m.
+  - name: OAUTH_USERINFO_CACHE_TTL
+    value: "5m"
+  # Do NOT set JWT_USER_HEADER — this path needs no trusted header.
+```
+
+UserInfo validation is enabled automatically when `JWT_ISSUER` is set and OIDC
+discovery succeeds (discovery failure is non-fatal and logged). The resolved
+`email` (or whichever `JWT_USER_CLAIM` you choose) is looked up in `perm.yaml`.
+When the claim is `email`, an explicit `email_verified: false` from the provider
+is rejected.
+
+### Gateway side
+
+Configure the Envoy Gateway `SecurityPolicy` to authenticate at the gateway and
+forward the access token (see `deploy.yaml` for a full example):
+
+```yaml
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: csi-secret-age-google-oidc
+  namespace: kube-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: csi-secret-age-admin
+  oidc:
+    provider:
+      issuer: "https://accounts.google.com"
+    clientID: "387398432539-xxx.apps.googleusercontent.com"
+    clientSecret:
+      name: "csi-secret-age-google-oidc-secret"   # must hold key "client-secret"
+    scopes: ["email"]                              # else Google omits the email claim
+    redirectURL: "https://vault.example.com/oauth2/callback"  # register in the Google OAuth client
+    forwardAccessToken: true
+```
+
+> **Security note — no audience binding.** The UserInfo endpoint returns the
+> token's *user* claims but **not** its audience (`aud`), so this path cannot bind
+> the token to a specific client. It establishes *who* the caller is; the
+> permissions file is the authorization gate (a token minted for another client
+> of the same issuer resolves to that user's own email, and therefore only that
+> user's own permissions). If you need strict audience binding, use the
+> self-contained-JWT path above (CLI clients sending `Authorization: Bearer <id_token>`),
+> which validates `aud`/`iss`/signature locally.
+
+You can run both paths at once: opaque access tokens go through UserInfo, while
+self-contained JWTs are validated (and audience-bound) by the JWKS/public-key
+path.
+
+---
+
+## Trusted Header Authentication (legacy proxy integration)
+
+> **Prefer the UserInfo path above.** Header trust requires the proxy to
+> perfectly strip/overwrite the header for *all* untrusted traffic; a single
+> misconfiguration lets anyone with direct network access impersonate any user.
+> The UserInfo path has no such trusted-header surface.
+
+Some ingress/proxy implementations authenticate the user at the proxy layer and inject the identity as a plain HTTP header (e.g. an OIDC proxy that sets `X-Forwarded-User`).
 
 To support this deployment model, `csi-secret-age` can fall back to a trusted HTTP header for the username when no valid JWT Bearer token is present:
 
@@ -232,4 +312,6 @@ curl -H "Authorization: Bearer $(cat /tmp/admin.jwt)" http://localhost:8090/entr
 | JWKS token requirement | Token header must include `kid` |
 | JWKS cache TTL | `JWT_JWKS_REFRESH_INTERVAL` (default `15m`) |
 | Audience validation | `JWT_AUDIENCE` (e.g. your OAuth `client_id`) |
-| Issuer validation | `JWT_ISSUER` (e.g. `https://accounts.google.com`) |
+| Issuer validation / OIDC discovery | `JWT_ISSUER` (e.g. `https://accounts.google.com`) |
+| Opaque access-token validation | OIDC UserInfo, enabled when `JWT_ISSUER` is set |
+| UserInfo identity cache TTL | `OAUTH_USERINFO_CACHE_TTL` (default `5m`) |

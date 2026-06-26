@@ -66,6 +66,13 @@ type Config struct {
 	// JWTJWKSRefreshInterval controls how often the JWKS URL cache is refreshed.
 	JWTJWKSRefreshInterval time.Duration `env:"JWT_JWKS_REFRESH_INTERVAL" envDefault:"15m"`
 
+	// OAuthUserInfoCacheTTL controls how long an identity resolved from the OIDC
+	// UserInfo endpoint is cached. UserInfo validation is enabled automatically
+	// when JWT_ISSUER is set and OIDC discovery succeeds, and is used to validate
+	// opaque OAuth2 access tokens (e.g. those forwarded by a gateway after an OIDC
+	// login) that are not self-contained JWTs.
+	OAuthUserInfoCacheTTL time.Duration `env:"OAUTH_USERINFO_CACHE_TTL" envDefault:"5m"`
+
 	// KMSCiphertext is the base64-encoded ciphertext blob from AWS KMS encrypt.
 	// When set and compiled with the 'kms' build tag, the provider fetches the
 	// age master key from AWS KMS at startup instead of using MASTER_KEY.

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"filippo.io/age"
 	"github.com/caarlos0/env/v11"
@@ -118,6 +119,25 @@ func main() {
 			os.Exit(1)
 		}
 		logger.Info("Permissions loaded", "path", cfg.PermConfigPath, "user_claim", cfg.JWTUserClaim)
+
+		// When an issuer is configured, run OIDC discovery so opaque OAuth2 access
+		// tokens (e.g. forwarded by the gateway after an OIDC login) can be
+		// validated against the provider's UserInfo endpoint. Discovery failure is
+		// non-fatal: the JWT and header auth paths still work without it.
+		if cfg.JWTIssuer != "" {
+			discoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			provider, errOIDC := NewOIDCProvider(discoveryCtx, cfg.JWTIssuer)
+			cancel()
+			if errOIDC != nil {
+				logger.Warn("OIDC discovery failed; opaque access-token (UserInfo) validation disabled",
+					"issuer", cfg.JWTIssuer, "error", errOIDC)
+			} else {
+				permMgr.EnableUserInfoAuth(provider, cfg.OAuthUserInfoCacheTTL)
+				logger.Info("OIDC UserInfo access-token validation enabled",
+					"issuer", cfg.JWTIssuer, "cache_ttl", cfg.OAuthUserInfoCacheTTL)
+			}
+		}
+
 		if cfg.JWTUserHeader != "" {
 			logger.Warn("Header-based authentication enabled: trusting upstream proxy to set header",
 				"user_header", cfg.JWTUserHeader,

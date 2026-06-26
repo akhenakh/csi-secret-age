@@ -56,6 +56,27 @@ func withAuth(handler http.Handler, permMgr *PermissionManager, logger *slog.Log
 				"remote_addr", r.RemoteAddr,
 				"error", err,
 			)
+
+			// The bearer may be an opaque OAuth2 access token (e.g. one forwarded
+			// by the gateway after an OIDC login) rather than a self-contained JWT.
+			// Resolve it via the OIDC UserInfo endpoint.
+			if username, uiErr := permMgr.ValidateAccessToken(r.Context(), token); uiErr == nil {
+				userPerms := permMgr.GetUserPermissions(username)
+				logger.Debug("access token auth succeeded",
+					"path", r.URL.Path,
+					"username", username,
+					"is_admin", userPerms.isAdmin,
+				)
+				ctx := context.WithValue(r.Context(), userPermsKey, userPerms)
+				handler.ServeHTTP(w, r.WithContext(ctx))
+				return
+			} else {
+				logger.Debug("access token validation failed",
+					"path", r.URL.Path,
+					"remote_addr", r.RemoteAddr,
+					"error", uiErr,
+				)
+			}
 		}
 
 		// Fall back to a trusted proxy header when configured. This is useful

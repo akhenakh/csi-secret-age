@@ -438,3 +438,4 @@ flowchart TB
 - [] read sub from header if the gw is doing the auth (less safe)
 - tls
 - env export
+- implement NATS KV, or objectstore in place of KMS

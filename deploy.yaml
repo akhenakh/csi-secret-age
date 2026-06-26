@@ -136,8 +136,32 @@ spec:
             #   value: /etc/csi-secret-age/secrets/gcpkms/keyName
             # - name: GCP_KMS_CIPHERTEXT_FILE
             #   value: /etc/csi-secret-age/secrets/gcpkms/ciphertext
+            # --- Web UI authentication -------------------------------------
+            # Pick ONE model below. See README_JWT.md for the full guide.
+            #
+            # (a) Static RSA public key (CLI clients send a signed RS256 JWT):
             - name: JWT_PUBLIC_KEY_FILE
               value: /etc/csi-secret-age/secrets/jwt/jwt-public-key.pem
+            #
+            # (b) Google SSO via Envoy Gateway OIDC (recommended for browsers).
+            #     The gateway forwards the OIDC access token (forwardAccessToken),
+            #     and the pod resolves it to an email via the provider's UserInfo
+            #     endpoint (discovered from JWT_ISSUER). Leave JWT_USER_HEADER
+            #     UNSET so there is no spoofable trusted header.
+            #     See the SecurityPolicy / HTTPRoute example at the end of this file.
+            # - name: JWT_ISSUER
+            #   value: "https://accounts.google.com"
+            # - name: JWT_USER_CLAIM
+            #   value: "email"
+            # - name: OAUTH_USERINFO_CACHE_TTL
+            #   value: "5m"
+            #   # Optional: also accept self-contained Bearer JWTs (e.g. from CLI
+            #   # clients). When set, these get audience-bound validation.
+            # - name: JWT_JWKS_URL
+            #   value: "https://www.googleapis.com/oauth2/v3/certs"
+            # - name: JWT_AUDIENCE
+            #   value: "387398432539-xxx.apps.googleusercontent.com"
+            # ---------------------------------------------------------------
             - name: PERM_CONFIG_PATH
               value: /etc/csi-secret-age/perm.yaml
             - name: SOCKET_PATH
@@ -167,3 +191,70 @@ spec:
         - name: jwt-public-key-secret
           secret:
             secretName: jwt-public-key
+---
+# ============================================================================
+# OPTIONAL: Expose the Web UI behind Envoy Gateway with Google SSO (OIDC).
+#
+# Flow: browser -> Envoy Gateway (OIDC login at Google) -> forwards the OAuth2
+# access token as `Authorization: Bearer ...` -> the pod resolves it to an
+# email via Google's UserInfo endpoint (see env model (b) above).
+#
+# Requires the Gateway API + Envoy Gateway CRDs. Adjust hostnames, the parent
+# Gateway/listener, and the clientID to your environment.
+# ============================================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: csi-secret-age-admin
+  namespace: kube-system
+spec:
+  selector:
+    app: csi-secret-age
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: SecurityPolicy
+metadata:
+  name: csi-secret-age-google-oidc
+  namespace: kube-system
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: csi-secret-age-admin
+  oidc:
+    provider:
+      issuer: "https://accounts.google.com"
+    clientID: "387398432539-xxx.apps.googleusercontent.com"
+    clientSecret:
+      name: "csi-secret-age-google-oidc-secret" # Secret must hold key "client-secret"
+    scopes: ["email"]                            # else Google omits the email claim
+    redirectURL: "https://vault.example.com/oauth2/callback" # register this in the Google OAuth client
+    # forwardAccessToken makes Envoy send the OIDC access token upstream as
+    # `Authorization: Bearer ...`; the pod validates it via the UserInfo endpoint.
+    forwardAccessToken: true
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: csi-secret-age-admin
+  namespace: kube-system
+spec:
+  parentRefs:
+    - name: eg                       # your Gateway name
+      namespace: envoy-gateway-system
+      sectionName: https             # the listener whose hostname matches below
+  hostnames:
+    - "vault.example.com"
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: csi-secret-age-admin
+          namespace: kube-system
+          port: 8090

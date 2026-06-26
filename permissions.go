@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -18,8 +20,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/fsnotify/fsnotify"
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/oauth2"
 	"gopkg.in/yaml.v3"
 )
 
@@ -29,6 +33,12 @@ type PermissionManager struct {
 	userClaim  string
 	audience   string
 	issuer     string
+
+	// oidcProvider, when set, enables validation of opaque OAuth2 access tokens
+	// via the provider's UserInfo endpoint. userInfoCache memoises the resolved
+	// identities. Both are nil unless EnableUserInfoAuth has been called.
+	oidcProvider  *oidc.Provider
+	userInfoCache *userInfoCache
 
 	mu                   sync.RWMutex
 	permissions          map[string][]string
@@ -525,6 +535,124 @@ func issuerMatches(claims jwt.MapClaims, expected string) bool {
 		return false
 	}
 	return raw == expected
+}
+
+// NewOIDCProvider performs OIDC discovery against the issuer, fetching its
+// .well-known/openid-configuration document so the UserInfo and JWKS endpoints
+// are learned automatically. It works with any compliant OIDC provider
+// (Google, Azure AD, Okta, Keycloak, ...).
+func NewOIDCProvider(ctx context.Context, issuer string) (*oidc.Provider, error) {
+	return oidc.NewProvider(ctx, issuer)
+}
+
+// EnableUserInfoAuth turns on validation of opaque OAuth2 access tokens via the
+// OIDC UserInfo endpoint. Resolved identities are cached for ttl. Call once at
+// startup after OIDC discovery has succeeded.
+func (pm *PermissionManager) EnableUserInfoAuth(provider *oidc.Provider, ttl time.Duration) {
+	pm.oidcProvider = provider
+	pm.userInfoCache = newUserInfoCache(ttl)
+}
+
+// ValidateAccessToken resolves the identity behind an opaque OAuth2 access
+// token by calling the OIDC UserInfo endpoint, returning the configured user
+// claim (e.g. "email"). Results are cached to avoid a UserInfo round-trip per
+// request.
+//
+// SECURITY NOTE: the UserInfo endpoint returns the token's *user* claims but
+// not its audience, so this path cannot bind the token to a particular client
+// (aud). It authenticates *who* the caller is; authorization is then enforced
+// per-identity through the permissions file. Self-contained JWTs (validated by
+// ValidateJWT) remain the audience-bound path.
+func (pm *PermissionManager) ValidateAccessToken(ctx context.Context, token string) (string, error) {
+	if pm.oidcProvider == nil {
+		return "", errors.New("access token validation is not configured")
+	}
+
+	cacheKey := tokenCacheKey(token)
+	if username, ok := pm.userInfoCache.get(cacheKey); ok {
+		return username, nil
+	}
+
+	userInfo, err := pm.oidcProvider.UserInfo(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
+	if err != nil {
+		return "", fmt.Errorf("userinfo lookup failed: %w", err)
+	}
+
+	var claims map[string]any
+	if err := userInfo.Claims(&claims); err != nil {
+		return "", fmt.Errorf("failed to parse userinfo claims: %w", err)
+	}
+
+	username, _ := claims[pm.userClaim].(string)
+	if username == "" {
+		return "", fmt.Errorf("claim %q not found or empty in userinfo response", pm.userClaim)
+	}
+
+	// When the identity is the email, reject it if the provider explicitly says
+	// it is unverified. email_verified may be a bool or a string depending on the
+	// provider; absence is treated as "no opinion" and does not reject.
+	if pm.userClaim == "email" {
+		switch v := claims["email_verified"].(type) {
+		case bool:
+			if !v {
+				return "", errors.New("email is not verified")
+			}
+		case string:
+			if v == "false" {
+				return "", errors.New("email is not verified")
+			}
+		}
+	}
+
+	pm.userInfoCache.put(cacheKey, username)
+	return username, nil
+}
+
+// tokenCacheKey hashes a token so raw bearer tokens are never used as map keys
+// or held longer than necessary.
+func tokenCacheKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// userInfoCache is a small TTL cache mapping a hashed access token to the
+// identity resolved from the UserInfo endpoint.
+type userInfoCache struct {
+	ttl     time.Duration
+	mu      sync.Mutex
+	entries map[string]userInfoCacheEntry
+}
+
+type userInfoCacheEntry struct {
+	username string
+	expires  time.Time
+}
+
+func newUserInfoCache(ttl time.Duration) *userInfoCache {
+	if ttl <= 0 {
+		ttl = 5 * time.Minute
+	}
+	return &userInfoCache{ttl: ttl, entries: make(map[string]userInfoCacheEntry)}
+}
+
+func (c *userInfoCache) get(key string) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	entry, ok := c.entries[key]
+	if !ok {
+		return "", false
+	}
+	if time.Now().After(entry.expires) {
+		delete(c.entries, key)
+		return "", false
+	}
+	return entry.username, true
+}
+
+func (c *userInfoCache) put(key, username string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries[key] = userInfoCacheEntry{username: username, expires: time.Now().Add(c.ttl)}
 }
 
 func (pm *PermissionManager) GetUserPermissions(username string) *UserPermissions {
