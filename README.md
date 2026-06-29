@@ -24,8 +24,10 @@ No external databases or heavy Vault installations are required.
 2. The [Secrets Store CSI Driver](https://secrets-store-csi-driver.sigs.k8s.io/) installed:
    ```bash
    helm repo add secrets-store-csi-driver https://kubernetes-sigs.github.io/secrets-store-csi-driver/charts
-   helm install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver --namespace kube-system --set syncSecret.enabled=true
+   helm install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver \
+     --namespace kube-system --set syncSecret.enabled=true
    ```
+   Use `--set syncSecret.enabled=true` only if you want the driver to create regular Kubernetes `Secret` objects from mounted files via `secretObjects`.
 3. `age` CLI installed locally to generate your master key (`brew install age` or `apt install age`).
 
 ---
@@ -328,6 +330,33 @@ spec:
       readOnly: true
       volumeAttributes:
         secretProviderClass: "app-secrets"
+```
+
+### 3. Sync to Kubernetes Secrets (optional)
+If you want the CSI driver to create a regular Kubernetes `Secret` from the mounted files (for example, to inject it as an environment variable), add a `secretObjects` section to the `SecretProviderClass`. This requires the Secrets Store CSI Driver to be installed with `syncSecret.enabled=true`:
+
+```bash
+helm install csi-secrets-store secrets-store-csi-driver/secrets-store-csi-driver \
+  --namespace kube-system --set syncSecret.enabled=true
+```
+
+Example `SecretProviderClass` that creates a Kubernetes Secret:
+```yaml
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: app-secrets
+  namespace: production
+spec:
+  provider: csi-secret-age
+  parameters:
+    secrets: "db-pass=/db/postgres/password"
+  secretObjects:
+    - secretName: my-db-secret
+      type: Opaque
+      data:
+        - objectName: db-pass       # must match the filename in `secrets`
+          key: password
 ```
 
 When the pod starts:
