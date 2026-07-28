@@ -66,7 +66,7 @@ func (s *ProviderServer) Mount(ctx context.Context, req *v1alpha1.MountRequest) 
 				continue
 			}
 			fileName := strings.TrimSpace(parts[0])
-			vaultPath := strings.TrimSpace(parts[1])
+			vaultPath := normalizePath(strings.TrimSpace(parts[1]))
 
 			if strings.Contains(fileName, "/") || strings.Contains(fileName, "\\") || fileName == ".." || strings.HasPrefix(fileName, ".") {
 				mountErr = fmt.Errorf("invalid file name %q", fileName)

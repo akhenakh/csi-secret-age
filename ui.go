@@ -645,7 +645,7 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 		var updatePath string
 		var isFolder bool
 		secret.Do(func() {
-			updatePath = strings.TrimSpace(r.FormValue("path"))
+			updatePath = normalizePath(strings.TrimSpace(r.FormValue("path")))
 			isFolder = r.FormValue("is_folder") == "true"
 			value := r.FormValue("value")
 
@@ -697,7 +697,7 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
-		deletePath := r.FormValue("path")
+		deletePath := normalizePath(r.FormValue("path"))
 		userPerms := getUserPerms(r)
 		if userPerms != nil && !userPerms.CanWrite(deletePath) {
 			http.Error(w, "Forbidden", http.StatusForbidden)

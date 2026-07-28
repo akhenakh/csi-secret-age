@@ -29,6 +29,20 @@ type VaultTree struct {
 	Nodes map[string]*VaultNode `json:"nodes"`
 }
 
+func (t *VaultTree) normalizeKeys() {
+	if t.Nodes == nil {
+		return
+	}
+	normalized := make(map[string]*VaultNode, len(t.Nodes))
+	for k, v := range t.Nodes {
+		nk := normalizePath(k)
+		if existing, ok := normalized[nk]; !ok || !existing.IsFolder {
+			normalized[nk] = v
+		}
+	}
+	t.Nodes = normalized
+}
+
 var ErrVaultLocked = errors.New("Vault is currently locked. Master key is required.")
 
 type VaultManager struct {
@@ -156,6 +170,7 @@ func (m *VaultManager) LoadAndDecrypt(ctx context.Context) (*VaultTree, error) {
 			decryptErr = err
 			return
 		}
+		t.normalizeKeys()
 		tree = &t
 	})
 	if decryptErr != nil {
