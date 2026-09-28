@@ -16,6 +16,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"path"
 	"strings"
 	"sync"
 	"time"
@@ -724,9 +725,12 @@ func (up *UserPermissions) CanExport() bool {
 	return up.isAdmin
 }
 
+// matchPermission compares against the cleaned path, so segments such as
+// ".." cannot be used to escape a granted prefix (e.g. /app/../admin/x is
+// checked as /admin/x).
 func matchPermission(pattern, vaultPath string) bool {
 	pattern = normalizePath(pattern)
-	vaultPath = normalizePath(vaultPath)
+	vaultPath = path.Clean(normalizePath(vaultPath))
 
 	if strings.HasSuffix(pattern, "/*") {
 		prefix := strings.TrimSuffix(pattern, "/*")

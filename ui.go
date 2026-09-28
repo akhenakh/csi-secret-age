@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -358,6 +359,25 @@ func normalizePath(p string) string {
 	return p
 }
 
+// validateVaultPath rejects paths that are not in canonical form. Vault keys
+// are matched literally, while permissions are checked against the cleaned
+// path, so a key such as /app/../admin/x would be stored under one name and
+// authorized under another. p must already be normalized.
+func validateVaultPath(p string) error {
+	if p == "/" {
+		return errors.New("path is required")
+	}
+	for _, r := range p {
+		if unicode.IsControl(r) {
+			return errors.New("path must not contain control characters")
+		}
+	}
+	if path.Clean(p) != p {
+		return fmt.Errorf("path %q is not canonical: remove empty, '.' and '..' segments and any trailing slash", p)
+	}
+	return nil
+}
+
 // checkPathConflict validates that a new path does not conflict with existing nodes.
 // Returns an error message if there is a conflict, empty string otherwise.
 func checkPathConflict(tree *VaultTree, newPath string, isFolder bool) string {
@@ -681,8 +701,8 @@ func newAdminHandler(ctx context.Context, logger *slog.Logger, cfg Config, manag
 			isFolder = r.FormValue("is_folder") == "true"
 			value := r.FormValue("value")
 
-			if updatePath == "" {
-				updateErr = fmt.Errorf("path is required")
+			if err := validateVaultPath(updatePath); err != nil {
+				updateErr = err
 				return
 			}
 			if !isFolder && value == "" {

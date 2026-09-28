@@ -1703,3 +1703,81 @@ func TestPermissionManager_ValidateJWT_Hardening(t *testing.T) {
 		}
 	})
 }
+
+func TestMatchPermission_DotDotCannotEscapePrefix(t *testing.T) {
+	tests := []struct {
+		path string
+		want bool
+	}{
+		{"/app/x", true},
+		{"/app/../admin/x", false},
+		{"/app/./x", true},
+		{"/app//x", true},
+		{"/app/x/../../admin", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			assert.Equal(t, tt.want, matchPermission("/app/*", tt.path))
+		})
+	}
+
+	up := &UserPermissions{username: "u", patterns: []string{"/app/*"}}
+	assert.False(t, up.CanWrite("/app/../admin/x"))
+
+	pm := &PermissionManager{namespacePermissions: map[string][]string{"prod": {"/app/*"}}}
+	assert.False(t, pm.CanAccess("prod", "sa", "/app/../admin/x"))
+}
+
+func TestValidateVaultPath(t *testing.T) {
+	tests := []struct {
+		path    string
+		wantErr bool
+	}{
+		{"/app/x", false},
+		{"/app", false},
+		{"/", true},
+		{"/app/../admin/x", true},
+		{"/app/./x", true},
+		{"/app//x", true},
+		{"/app/x/", true},
+		{"/app/\x00x", true},
+		{"/app/\nx", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			err := validateVaultPath(tt.path)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestUpdateHandler_RejectsNonCanonicalPath(t *testing.T) {
+	ctx := context.Background()
+	masterKey := generateTestMasterKey(t)
+	cfg := Config{MasterKey: masterKey, VaultSecretName: "test-vault", VaultNamespace: "kube-system", DevMode: true}
+	mgr := NewVaultManager(cfg, fake.NewSimpleClientset(), &EnvKeyProvider{Key: masterKey})
+	handler, err := newAdminHandler(ctx, getTestLogger(), cfg, mgr, nil)
+	require.NoError(t, err)
+
+	update := func(p string) int {
+		form := url.Values{"path": {p}, "value": {"v"}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader(form))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	assert.NotEqual(t, http.StatusSeeOther, update("/app/../admin/x"))
+	assert.NotEqual(t, http.StatusSeeOther, update("/"))
+	assert.Equal(t, http.StatusSeeOther, update("/app/x"))
+
+	tree, err := mgr.LoadAndDecrypt(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, tree.Nodes, "/app/x")
+	assert.Len(t, tree.Nodes, 1)
+}
