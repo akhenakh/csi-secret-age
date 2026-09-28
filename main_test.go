@@ -15,9 +15,11 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	stdlibruntime "runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -233,7 +235,7 @@ func TestVaultManager_LockedState(t *testing.T) {
 
 	// 4. Unlock with a valid key
 	masterKey := generateTestMasterKey(t)
-	err = mgr.Unlock(masterKey)
+	err = mgr.Unlock(ctx, masterKey)
 	require.NoError(t, err)
 	require.False(t, mgr.IsLocked())
 
@@ -269,7 +271,7 @@ func TestUnlockWithKeygenFileFormat(t *testing.T) {
 	mgr := NewVaultManager(cfg, fakeClient, nil)
 	require.True(t, mgr.IsLocked())
 
-	err = mgr.Unlock(keygenFile)
+	err = mgr.Unlock(ctx, keygenFile)
 	require.NoError(t, err, "Unlock must accept a full age-keygen file")
 	require.False(t, mgr.IsLocked())
 
@@ -1520,4 +1522,69 @@ func TestWithAuth_NoPermManager(t *testing.T) {
 			assert.Equal(t, tt.wantCode, rec.Code)
 		})
 	}
+}
+
+func TestVaultManager_UnlockRejectsReplacementAndWrongKey(t *testing.T) {
+	ctx := context.Background()
+	fakeClient := fake.NewSimpleClientset()
+	cfg := Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system"}
+	goodKey := generateTestMasterKey(t)
+	otherKey := generateTestMasterKey(t)
+
+	// Seed an existing vault encrypted with goodKey.
+	seed := NewVaultManager(cfg, fakeClient, &EnvKeyProvider{Key: goodKey})
+	require.NoError(t, seed.EncryptAndSave(ctx, &VaultTree{Nodes: map[string]*VaultNode{"/s": {Value: "v"}}}))
+
+	// An already-unlocked vault refuses a new key, and keeps working.
+	require.ErrorIs(t, seed.Unlock(ctx, otherKey), ErrVaultAlreadyUnlocked)
+	_, err := seed.LoadAndDecrypt(ctx)
+	require.NoError(t, err)
+
+	// A locked vault refuses a key that cannot decrypt the stored vault.
+	mgr := NewVaultManager(cfg, fakeClient, nil)
+	err = mgr.Unlock(ctx, otherKey)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot decrypt existing vault")
+	assert.True(t, mgr.IsLocked())
+
+	// The correct key unlocks it.
+	require.NoError(t, mgr.Unlock(ctx, goodKey))
+	assert.False(t, mgr.IsLocked())
+}
+
+func TestUnlockHandler_RequiresAdmin(t *testing.T) {
+	ctx := context.Background()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	permPath := filepath.Join(t.TempDir(), "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - admin\nuser_permissions:\n  plain-user:\n    - /secrets/*\n"), 0644))
+	pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	cfg := Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system", JWTUserHeader: "X-Forwarded-User"}
+	mgr := NewVaultManager(cfg, fake.NewSimpleClientset(), nil)
+	handler := newAdminHandler(ctx, getTestLogger(), cfg, mgr, pm)
+
+	unlock := func(user string) *httptest.ResponseRecorder {
+		form := "master_key=" + url.QueryEscape(generateTestMasterKey(t))
+		req := httptest.NewRequest(http.MethodPost, "/unlock", strings.NewReader(form))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("X-Forwarded-User", user)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	assert.Equal(t, http.StatusForbidden, unlock("plain-user").Code)
+	assert.True(t, mgr.IsLocked())
+
+	assert.Equal(t, http.StatusSeeOther, unlock("admin").Code)
+	assert.False(t, mgr.IsLocked())
+
+	// A second unlock, even by an admin, cannot replace the key.
+	assert.Equal(t, http.StatusConflict, unlock("admin").Code)
 }

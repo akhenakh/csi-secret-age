@@ -45,6 +45,10 @@ func (t *VaultTree) normalizeKeys() {
 
 var ErrVaultLocked = errors.New("Vault is currently locked. Master key is required.")
 
+// ErrVaultAlreadyUnlocked is returned by Unlock when a key is already loaded.
+// Replacing the key of a running vault would break every mount and write.
+var ErrVaultAlreadyUnlocked = errors.New("vault is already unlocked")
+
 type VaultManager struct {
 	k8sClient kubernetes.Interface
 	config    Config
@@ -73,7 +77,7 @@ func NewVaultManager(cfg Config, client kubernetes.Interface, keyProvider Master
 		case key == "":
 			slog.Warn("KeyProvider returned an empty master key; vault remains locked")
 		default:
-			if unlockErr := vm.Unlock(key); unlockErr != nil {
+			if unlockErr := vm.Unlock(ctx, key); unlockErr != nil {
 				slog.Error("Auto-unlock failed", "error", unlockErr)
 			} else {
 				slog.Info("Vault auto-unlocked successfully via KeyProvider")
@@ -90,10 +94,13 @@ func (m *VaultManager) IsLocked() bool {
 	return m.isLocked
 }
 
-// Unlock parses the master key and unlocks the vault if valid.
-func (m *VaultManager) Unlock(masterKey string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// Unlock parses the master key and unlocks the vault if valid. It refuses to
+// replace a key that is already loaded, and when a vault already exists in
+// Kubernetes the key must be able to decrypt it.
+func (m *VaultManager) Unlock(ctx context.Context, masterKey string) error {
+	if !m.IsLocked() {
+		return ErrVaultAlreadyUnlocked
+	}
 
 	var parseErr error
 	var identity *age.X25519Identity
@@ -122,9 +129,45 @@ func (m *VaultManager) Unlock(masterKey string) error {
 		return fmt.Errorf("invalid master key: %w", parseErr)
 	}
 
+	if err := m.verifyIdentity(ctx, identity); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Re-check under the write lock: a concurrent Unlock may have won.
+	if !m.isLocked {
+		return ErrVaultAlreadyUnlocked
+	}
 	m.identity = identity
 	m.isLocked = false
 	return nil
+}
+
+// verifyIdentity checks that identity can decrypt the stored vault. A missing
+// or empty vault Secret is accepted so a fresh installation can bootstrap.
+func (m *VaultManager) verifyIdentity(ctx context.Context, identity *age.X25519Identity) error {
+	sec, err := m.k8sClient.CoreV1().Secrets(m.config.VaultNamespace).Get(ctx, m.config.VaultSecretName, metav1.GetOptions{})
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to load vault to verify master key: %w", err)
+	}
+	ciphertext, ok := sec.Data["vault.enc"]
+	if !ok || len(ciphertext) == 0 {
+		return nil
+	}
+
+	var verifyErr error
+	secret.Do(func() {
+		// age.Decrypt unwraps the file key from the header, which fails
+		// unless identity is one of the vault's recipients.
+		if _, err := age.Decrypt(bytes.NewReader(ciphertext), identity); err != nil {
+			verifyErr = fmt.Errorf("invalid master key: cannot decrypt existing vault: %w", err)
+		}
+	})
+	return verifyErr
 }
 
 func (m *VaultManager) LoadAndDecrypt(ctx context.Context) (*VaultTree, error) {

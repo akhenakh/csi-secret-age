@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html/template"
 	"log/slog"
@@ -539,7 +540,8 @@ func buildTreeState(tree *VaultTree, currentPath string, entryPath string, userP
 	return state
 }
 
-func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manager *VaultManager, permMgr *PermissionManager) error {
+// newAdminHandler builds the authenticated admin UI handler.
+func newAdminHandler(ctx context.Context, logger *slog.Logger, cfg Config, manager *VaultManager, permMgr *PermissionManager) http.Handler {
 	tmpl := template.Must(template.New("admin").Parse(adminHTML))
 	mux := http.NewServeMux()
 
@@ -622,13 +624,25 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		// Unlocking sets the key used for every mount and write, so it is an
+		// admin-only operation. userPerms is nil only in dev mode without auth.
+		if userPerms := getUserPerms(r); userPerms != nil && !userPerms.isAdmin {
+			logger.Warn("Unlock attempt by non-admin user", "username", userPerms.username)
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 		var unlockErr error
 		secret.Do(func() {
 			masterKey := r.FormValue("master_key")
-			unlockErr = manager.Unlock(masterKey)
+			unlockErr = manager.Unlock(ctx, masterKey)
 		})
+		if errors.Is(unlockErr, ErrVaultAlreadyUnlocked) {
+			logger.Warn("Unlock attempt while vault is already unlocked")
+			http.Error(w, "Vault is already unlocked", http.StatusConflict)
+			return
+		}
 		if unlockErr != nil {
 			logger.Warn("Failed unlock attempt", "error", unlockErr)
 			state := UIState{Locked: true, Error: "Invalid Master Key provided."}
@@ -761,10 +775,14 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 		w.Write(sec.Data["vault.enc"])
 	})
 
+	return withAuth(mux, permMgr, logger, cfg.JWTUserHeader, cfg.JWTAdminHeader, cfg.JWTAdminValue, cfg.DevMode)
+}
+
+func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manager *VaultManager, permMgr *PermissionManager) error {
 	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      withAuth(mux, permMgr, logger, cfg.JWTUserHeader, cfg.JWTAdminHeader, cfg.JWTAdminValue, cfg.DevMode),
+		Handler:      newAdminHandler(ctx, logger, cfg, manager, permMgr),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,
