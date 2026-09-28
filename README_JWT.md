@@ -167,7 +167,10 @@ signature is not enough. You must also verify that the token was issued for
 your application by checking the **`aud`** claim (your OAuth `client_id`) and,
 optionally, the **`iss`** claim.
 
-Set `JWT_AUDIENCE` to your client ID and `JWT_ISSUER` to the expected issuer:
+Set `JWT_AUDIENCE` to your client ID and `JWT_ISSUER` to the expected issuer.
+`JWT_AUDIENCE` is required with `JWT_JWKS_URL`: the provider refuses to start
+without it. When `JWT_USER_CLAIM` is `email`, JWTs must also carry
+`email_verified: true`, and every JWT must have an `exp` claim.
 
 ```yaml
 env:

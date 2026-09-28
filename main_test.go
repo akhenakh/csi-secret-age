@@ -860,10 +860,14 @@ func generateTestJWKS(t testing.TB, privateKey *rsa.PrivateKey, kid string) stri
 	return string(b)
 }
 
+// testJWKSAudience is the audience required when validating via a JWKS URL.
+const testJWKSAudience = "test-client-id"
+
 func signTestTokenWithKID(tb testing.TB, privateKey *rsa.PrivateKey, kid, user string) string {
 	tb.Helper()
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
 		"sub": user,
+		"aud": testJWKSAudience,
 		"exp": time.Now().Add(time.Hour).Unix(),
 	})
 	token.Header["kid"] = kid
@@ -924,6 +928,7 @@ func TestPermissionManager_ValidateJWT_JWKSURL(t *testing.T) {
 
 	pm, err := NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{
 		JWKSURL:         server.URL,
+		Audience:        testJWKSAudience,
 		RefreshInterval: time.Hour, // long TTL to test caching
 	}, "sub")
 	require.NoError(t, err)
@@ -942,6 +947,7 @@ func TestPermissionManager_ValidateJWT_JWKSURL(t *testing.T) {
 	// With a zero TTL, every validation should refetch.
 	pmNoCache, err := NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{
 		JWKSURL:         server.URL,
+		Audience:        testJWKSAudience,
 		RefreshInterval: 0,
 	}, "sub")
 	require.NoError(t, err)
@@ -1631,4 +1637,69 @@ func TestAdminHandler_CSRFProtection(t *testing.T) {
 
 	_, err = newAdminHandler(ctx, getTestLogger(), Config{CSRFTrustedOrigins: []string{"not a url"}}, mgr, nil)
 	require.Error(t, err)
+}
+
+func TestPermissionManager_ValidateJWT_Hardening(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	permPath := filepath.Join(t.TempDir(), "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - alice@example.com\n"), 0644))
+
+	sign := func(claims jwt.MapClaims) string {
+		signed, err := jwt.NewWithClaims(jwt.SigningMethodRS256, claims).SignedString(privateKey)
+		require.NoError(t, err)
+		return signed
+	}
+	exp := time.Now().Add(time.Hour).Unix()
+
+	t.Run("JWKS URL requires an audience", func(t *testing.T) {
+		_, err := NewPermissionManagerWithJWTConfig(permPath, JWTKeyConfig{JWKSURL: "https://example.com/jwks"}, "sub")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "JWT_AUDIENCE is required")
+	})
+
+	t.Run("exp is required", func(t *testing.T) {
+		pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+		require.NoError(t, err)
+		_, err = pm.ValidateJWT(sign(jwt.MapClaims{"sub": "alice@example.com"}))
+		require.Error(t, err)
+		_, err = pm.ValidateJWT(sign(jwt.MapClaims{"sub": "alice@example.com", "exp": exp}))
+		require.NoError(t, err)
+	})
+
+	t.Run("email claim must be verified", func(t *testing.T) {
+		pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "email")
+		require.NoError(t, err)
+		tests := []struct {
+			name     string
+			verified any
+			wantErr  bool
+		}{
+			{"missing", nil, true},
+			{"false", false, true},
+			{"string false", "false", true},
+			{"true", true, false},
+			{"string true", "true", false},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				claims := jwt.MapClaims{"email": "alice@example.com", "exp": exp}
+				if tt.verified != nil {
+					claims["email_verified"] = tt.verified
+				}
+				username, err := pm.ValidateJWT(sign(claims))
+				if tt.wantErr {
+					require.Error(t, err)
+					assert.Contains(t, err.Error(), "email is not verified")
+					return
+				}
+				require.NoError(t, err)
+				assert.Equal(t, "alice@example.com", username)
+			})
+		}
+	})
 }

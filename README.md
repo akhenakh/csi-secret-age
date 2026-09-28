@@ -230,6 +230,12 @@ When `JWT_AUDIENCE` is set, every token must contain that audience (`aud`)
 claim. When `JWT_ISSUER` is set, every token must come from that issuer
 (`iss`). This is essential for SSO: without it, a valid token signed by the
 same provider but intended for a different client could be accepted.
+`JWT_AUDIENCE` is **required** with `JWT_JWKS_URL`; the provider refuses to
+start without it.
+
+Every JWT must carry an `exp` claim and be signed with RS256, RS384 or RS512.
+When `JWT_USER_CLAIM` is `email`, the token must also carry
+`email_verified: true`.
 
 When these are set, every request to the Web UI must include a valid `Authorization: Bearer <jwt>` token. The UI will then only show folders and secrets the user is allowed to read.
 

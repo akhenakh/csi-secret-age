@@ -85,6 +85,12 @@ func NewPermissionManagerWithJWTConfig(configPath string, cfg JWTKeyConfig, user
 	if err != nil {
 		return nil, err
 	}
+	// A JWKS URL usually points at a shared identity provider (e.g. Google)
+	// that signs tokens for every client it serves. Without an audience check,
+	// a token minted for any other application would be accepted here.
+	if cfg.JWKSURL != "" && cfg.Audience == "" {
+		return nil, errors.New("JWT_AUDIENCE is required when JWT_JWKS_URL is set")
+	}
 
 	pm := &PermissionManager{
 		configPath: configPath,
@@ -475,7 +481,10 @@ func (pm *PermissionManager) ValidateJWT(tokenString string) (string, error) {
 	if pm.keyfunc == nil {
 		return "", errors.New("JWT validation is not configured")
 	}
-	token, err := jwt.Parse(tokenString, pm.keyfunc)
+	token, err := jwt.Parse(tokenString, pm.keyfunc,
+		jwt.WithExpirationRequired(),
+		jwt.WithValidMethods([]string{"RS256", "RS384", "RS512"}),
+	)
 	if err != nil {
 		return "", err
 	}
@@ -500,7 +509,25 @@ func (pm *PermissionManager) ValidateJWT(tokenString string) (string, error) {
 		return "", fmt.Errorf("claim %s not found or empty", pm.userClaim)
 	}
 
+	// An email identity is only trustworthy once the provider has verified
+	// it; otherwise anyone can register an account claiming a victim's email.
+	if pm.userClaim == "email" && !emailVerified(claims["email_verified"]) {
+		return "", errors.New("email is not verified")
+	}
+
 	return username, nil
+}
+
+// emailVerified reports whether an email_verified claim is explicitly true.
+// Providers encode it as either a bool or a string.
+func emailVerified(v any) bool {
+	switch v := v.(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true"
+	}
+	return false
 }
 
 func audienceMatches(claims jwt.MapClaims, expected string) bool {
