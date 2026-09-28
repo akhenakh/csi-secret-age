@@ -98,6 +98,7 @@ All sensitive configuration values support a `_FILE` suffix to read from a file 
 | `JWT_JWKS_REFRESH_INTERVAL` | — | JWKS URL cache TTL (default `15m`) |
 | `JWT_AUDIENCE` | — | Expected `aud` claim, e.g. your OAuth client_id |
 | `JWT_ISSUER` | — | Expected `iss` claim, e.g. `https://accounts.google.com` |
+| `CSRF_TRUSTED_ORIGINS` | — | Comma-separated extra origins (e.g. `https://vault.example.com`) allowed to POST to the Web UI. Cross-origin browser POSTs are rejected; set this only if your proxy rewrites the `Host` header |
 `JWT_PUBLIC_KEY` and the JWKS options are **mutually exclusive** — configure one or the other.
 
 When both the inline and file variants are set, the **file takes precedence**. File contents are trimmed of leading/trailing whitespace.

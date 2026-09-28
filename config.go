@@ -73,6 +73,12 @@ type Config struct {
 	// login) that are not self-contained JWTs.
 	OAuthUserInfoCacheTTL time.Duration `env:"OAUTH_USERINFO_CACHE_TTL" envDefault:"5m"`
 
+	// CSRFTrustedOrigins lists extra origins (scheme://host[:port]) allowed to
+	// submit state-changing requests to the Web UI. Same-origin requests are
+	// always allowed; set this only when a proxy rewrites the Host header so
+	// it no longer matches the browser's Origin.
+	CSRFTrustedOrigins []string `env:"CSRF_TRUSTED_ORIGINS" envSeparator:","`
+
 	// KMSCiphertext is the base64-encoded ciphertext blob from AWS KMS encrypt.
 	// When set and compiled with the 'kms' build tag, the provider fetches the
 	// age master key from AWS KMS at startup instead of using MASTER_KEY.

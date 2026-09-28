@@ -540,8 +540,17 @@ func buildTreeState(tree *VaultTree, currentPath string, entryPath string, userP
 	return state
 }
 
-// newAdminHandler builds the authenticated admin UI handler.
-func newAdminHandler(ctx context.Context, logger *slog.Logger, cfg Config, manager *VaultManager, permMgr *PermissionManager) http.Handler {
+// newAdminHandler builds the authenticated admin UI handler. Cross-origin
+// state-changing requests are rejected before authentication, so a browser
+// carrying the user's gateway session cannot be used for CSRF.
+func newAdminHandler(ctx context.Context, logger *slog.Logger, cfg Config, manager *VaultManager, permMgr *PermissionManager) (http.Handler, error) {
+	csrf := http.NewCrossOriginProtection()
+	for _, origin := range cfg.CSRFTrustedOrigins {
+		if err := csrf.AddTrustedOrigin(strings.TrimSpace(origin)); err != nil {
+			return nil, fmt.Errorf("invalid CSRF_TRUSTED_ORIGINS entry %q: %w", origin, err)
+		}
+	}
+
 	tmpl := template.Must(template.New("admin").Parse(adminHTML))
 	mux := http.NewServeMux()
 
@@ -775,14 +784,29 @@ func newAdminHandler(ctx context.Context, logger *slog.Logger, cfg Config, manag
 		w.Write(sec.Data["vault.enc"])
 	})
 
-	return withAuth(mux, permMgr, logger, cfg.JWTUserHeader, cfg.JWTAdminHeader, cfg.JWTAdminValue, cfg.DevMode)
+	authed := withAuth(mux, permMgr, logger, cfg.JWTUserHeader, cfg.JWTAdminHeader, cfg.JWTAdminValue, cfg.DevMode)
+	return withFrameDenial(csrf.Handler(authed)), nil
+}
+
+// withFrameDenial forbids rendering the UI in a frame, so its forms cannot be
+// clickjacked from another site.
+func withFrameDenial(handler http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+		handler.ServeHTTP(w, r)
+	})
 }
 
 func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manager *VaultManager, permMgr *PermissionManager) error {
+	handler, err := newAdminHandler(ctx, logger, cfg, manager, permMgr)
+	if err != nil {
+		return err
+	}
 	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      newAdminHandler(ctx, logger, cfg, manager, permMgr),
+		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,

@@ -1567,7 +1567,8 @@ func TestUnlockHandler_RequiresAdmin(t *testing.T) {
 
 	cfg := Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system", JWTUserHeader: "X-Forwarded-User"}
 	mgr := NewVaultManager(cfg, fake.NewSimpleClientset(), nil)
-	handler := newAdminHandler(ctx, getTestLogger(), cfg, mgr, pm)
+	handler, err := newAdminHandler(ctx, getTestLogger(), cfg, mgr, pm)
+	require.NoError(t, err)
 
 	unlock := func(user string) *httptest.ResponseRecorder {
 		form := "master_key=" + url.QueryEscape(generateTestMasterKey(t))
@@ -1587,4 +1588,47 @@ func TestUnlockHandler_RequiresAdmin(t *testing.T) {
 
 	// A second unlock, even by an admin, cannot replace the key.
 	assert.Equal(t, http.StatusConflict, unlock("admin").Code)
+}
+
+func TestAdminHandler_CSRFProtection(t *testing.T) {
+	ctx := context.Background()
+	masterKey := generateTestMasterKey(t)
+	cfg := Config{
+		MasterKey:          masterKey,
+		VaultSecretName:    "test-vault",
+		VaultNamespace:     "kube-system",
+		DevMode:            true,
+		CSRFTrustedOrigins: []string{"https://vault.example.com"},
+	}
+	mgr := NewVaultManager(cfg, fake.NewSimpleClientset(), &EnvKeyProvider{Key: masterKey})
+	handler, err := newAdminHandler(ctx, getTestLogger(), cfg, mgr, nil)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name     string
+		headers  map[string]string
+		wantCode int
+	}{
+		{"cross-site browser request", map[string]string{"Sec-Fetch-Site": "cross-site"}, http.StatusForbidden},
+		{"cross-origin Origin header", map[string]string{"Origin": "https://evil.example.com"}, http.StatusForbidden},
+		{"same-origin browser request", map[string]string{"Sec-Fetch-Site": "same-origin"}, http.StatusSeeOther},
+		{"trusted origin", map[string]string{"Sec-Fetch-Site": "cross-site", "Origin": "https://vault.example.com"}, http.StatusSeeOther},
+		{"non-browser client", nil, http.StatusSeeOther},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/update", strings.NewReader("path=/app/x&value=v"))
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			assert.Equal(t, tt.wantCode, rec.Code)
+			assert.Equal(t, "DENY", rec.Header().Get("X-Frame-Options"))
+		})
+	}
+
+	_, err = newAdminHandler(ctx, getTestLogger(), Config{CSRFTrustedOrigins: []string{"not a url"}}, mgr, nil)
+	require.Error(t, err)
 }
