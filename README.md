@@ -273,7 +273,7 @@ Then use an ingress or gateway (e.g., NGINX Ingress, Istio, Ambassador, Traefik)
 
 ### Authentication
 
-When `PERM_CONFIG_PATH` and `JWT_PUBLIC_KEY` are configured, the UI's built-in JWT middleware enforces access control. When they are **not** set, the UI is completely open — anyone with network access to port 8090 can read, write, and delete secrets, and can attempt to unlock the vault. Always configure JWT authentication in production, even behind a reverse proxy.
+When `PERM_CONFIG_PATH` and `JWT_PUBLIC_KEY` are configured, the UI's built-in JWT middleware enforces access control. `PERM_CONFIG_PATH` is **required**: without it the provider refuses to start, and a missing permission manager rejects every Web UI request and every mount. The only exception is `DEV_MODE=true`, where the UI is left unauthenticated and every pod can mount every secret, for local development only. Always configure JWT authentication in production, even behind a reverse proxy.
 
 
 ## Managing Secrets (Web UI)

@@ -720,7 +720,7 @@ func matchPermission(pattern, vaultPath string) bool {
 
 func (pm *PermissionManager) CanAccess(namespace, sa, vaultPath string) bool {
 	if pm == nil {
-		return true
+		return false
 	}
 
 	pm.mu.RLock()

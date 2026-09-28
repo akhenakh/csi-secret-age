@@ -108,8 +108,9 @@ func TestProviderServer_Mount(t *testing.T) {
 
 	// Setup ProviderServer
 	server := &ProviderServer{
-		manager: mgr,
-		logger:  getTestLogger(),
+		manager:              mgr,
+		logger:               getTestLogger(),
+		allowUnauthenticated: true,
 	}
 
 	// Setup Vault Data
@@ -665,9 +666,9 @@ namespace_permissions:
 			want: true,
 		},
 		{
-			name: "nil PermissionManager allows all",
+			name: "nil PermissionManager denies all",
 			ns:   "staging", sa: "web", path: "/any/secret",
-			want: true,
+			want: false,
 		},
 	}
 
@@ -1120,7 +1121,7 @@ func BenchmarkProviderServer_Mount(b *testing.B) {
 
 	require.NoError(b, mgr.EncryptAndSave(ctx, buildBenchmarkTree(100)))
 
-	server := &ProviderServer{manager: mgr, logger: getTestLogger()}
+	server := &ProviderServer{manager: mgr, logger: getTestLogger(), allowUnauthenticated: true}
 	req := &v1alpha1.MountRequest{
 		Attributes: func() string {
 			attrs := map[string]string{
@@ -1348,7 +1349,7 @@ func TestWithAuth_JWTUserHeader(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "", "")
+	wrapped := withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "", "", false)
 
 	// Header auth succeeds for a regular user.
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -1396,7 +1397,7 @@ func TestWithAuth_HeaderAdminOverride(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "X-Admin", "true")
+	wrapped := withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "X-Admin", "true", false)
 
 	// Admin header marks a non-admin user as admin.
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -1446,7 +1447,7 @@ func TestWithAuth_JWTTakesPrecedenceOverHeader(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	wrapped := withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "", "")
+	wrapped := withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "", "", false)
 
 	// Both headers present; JWT wins.
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -1456,4 +1457,52 @@ func TestWithAuth_JWTTakesPrecedenceOverHeader(t *testing.T) {
 	wrapped.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "jwt-user", seenUser)
+}
+
+func TestProviderServer_Mount_NoPermManagerDenies(t *testing.T) {
+	ctx := context.Background()
+	masterKey := generateTestMasterKey(t)
+	cfg := Config{MasterKey: masterKey, VaultSecretName: "test-vault", VaultNamespace: "kube-system"}
+	mgr := NewVaultManager(cfg, fake.NewSimpleClientset(), &EnvKeyProvider{Key: masterKey})
+	require.NoError(t, mgr.EncryptAndSave(ctx, &VaultTree{Nodes: map[string]*VaultNode{"/db/pass": {Value: "v"}}}))
+
+	attrs, _ := json.Marshal(map[string]string{
+		"csi.storage.k8s.io/pod.namespace":       "prod",
+		"csi.storage.k8s.io/serviceAccount.name": "app",
+		"secrets":                                "p=/db/pass",
+	})
+	req := &v1alpha1.MountRequest{Attributes: string(attrs)}
+
+	server := &ProviderServer{manager: mgr, logger: getTestLogger()}
+	_, err := server.Mount(ctx, req)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "access denied")
+
+	server.allowUnauthenticated = true
+	resp, err := server.Mount(ctx, req)
+	require.NoError(t, err)
+	require.Len(t, resp.Files, 1)
+}
+
+func TestWithAuth_NoPermManager(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		name                 string
+		allowUnauthenticated bool
+		wantCode             int
+	}{
+		{"denied by default", false, http.StatusUnauthorized},
+		{"allowed in dev mode", true, http.StatusOK},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wrapped := withAuth(handler, nil, getTestLogger(), "", "", "", tt.allowUnauthenticated)
+			rec := httptest.NewRecorder()
+			wrapped.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+			assert.Equal(t, tt.wantCode, rec.Code)
+		})
+	}
 }

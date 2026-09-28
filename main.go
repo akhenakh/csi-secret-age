@@ -103,6 +103,16 @@ func main() {
 	keyProvider := resolveKeyProvider(&cfg)
 	manager := NewVaultManager(cfg, k8sClient, keyProvider)
 
+	// Without a permissions file there is no authentication on the Web UI and
+	// no namespace ACL on mounts, so refuse to start outside of dev mode.
+	if cfg.PermConfigPath == "" {
+		if !cfg.DevMode {
+			logger.Error("PERM_CONFIG_PATH is required; refusing to start with an unauthenticated Web UI and unrestricted mounts (set DEV_MODE=true for local development)")
+			os.Exit(1)
+		}
+		logger.Warn("DEV MODE without PERM_CONFIG_PATH: Web UI is unauthenticated and every pod can mount every secret")
+	}
+
 	var permMgr *PermissionManager
 	if cfg.PermConfigPath != "" {
 		var errPerm error
@@ -180,7 +190,7 @@ func main() {
 		os.Chmod(cfg.SocketPath, 0700)
 
 		grpcServer := grpc.NewServer()
-		v1alpha1.RegisterCSIDriverProviderServer(grpcServer, &ProviderServer{manager: manager, permMgr: permMgr, logger: logger})
+		v1alpha1.RegisterCSIDriverProviderServer(grpcServer, &ProviderServer{manager: manager, permMgr: permMgr, logger: logger, allowUnauthenticated: cfg.DevMode})
 
 		logger.Info("gRPC Provider listening", "socket", cfg.SocketPath)
 		go func() { <-ctx.Done(); grpcServer.GracefulStop() }()

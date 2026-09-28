@@ -28,11 +28,18 @@ func getUserPerms(r *http.Request) *UserPermissions {
 	return nil
 }
 
-func withAuth(handler http.Handler, permMgr *PermissionManager, logger *slog.Logger, userHeader, adminHeader, adminValue string) http.Handler {
+// withAuth authenticates requests against permMgr. When permMgr is nil every
+// request is rejected unless allowUnauthenticated is set (DEV_MODE only).
+func withAuth(handler http.Handler, permMgr *PermissionManager, logger *slog.Logger, userHeader, adminHeader, adminValue string, allowUnauthenticated bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if permMgr == nil {
-			logger.Debug("auth disabled: no permission manager configured")
-			handler.ServeHTTP(w, r)
+			if allowUnauthenticated {
+				logger.Debug("auth disabled: no permission manager configured (dev mode)")
+				handler.ServeHTTP(w, r)
+				return
+			}
+			logger.Debug("auth failed: no permission manager configured", "path", r.URL.Path, "remote_addr", r.RemoteAddr)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
 
@@ -755,7 +762,7 @@ func startHTTPServer(ctx context.Context, logger *slog.Logger, cfg Config, manag
 	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
 	server := &http.Server{
 		Addr:         addr,
-		Handler:      withAuth(mux, permMgr, logger, cfg.JWTUserHeader, cfg.JWTAdminHeader, cfg.JWTAdminValue),
+		Handler:      withAuth(mux, permMgr, logger, cfg.JWTUserHeader, cfg.JWTAdminHeader, cfg.JWTAdminValue, cfg.DevMode),
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  60 * time.Second,

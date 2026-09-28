@@ -16,6 +16,19 @@ type ProviderServer struct {
 	manager *VaultManager
 	permMgr *PermissionManager
 	logger  *slog.Logger
+
+	// allowUnauthenticated grants every pod access to every path when no
+	// permission manager is configured. Only set in DEV_MODE.
+	allowUnauthenticated bool
+}
+
+// canAccess reports whether the pod identity may mount vaultPath. Without a
+// permission manager access is denied unless allowUnauthenticated is set.
+func (s *ProviderServer) canAccess(namespace, sa, vaultPath string) bool {
+	if s.permMgr == nil {
+		return s.allowUnauthenticated
+	}
+	return s.permMgr.CanAccess(namespace, sa, vaultPath)
 }
 
 func (s *ProviderServer) Mount(ctx context.Context, req *v1alpha1.MountRequest) (*v1alpha1.MountResponse, error) {
@@ -79,7 +92,7 @@ func (s *ProviderServer) Mount(ctx context.Context, req *v1alpha1.MountRequest) 
 				return
 			}
 
-			if !s.permMgr.CanAccess(podNamespace, podSA, vaultPath) {
+			if !s.canAccess(podNamespace, podSA, vaultPath) {
 				s.logger.Warn("Namespace access denied", "path", vaultPath, "namespace", podNamespace, "sa", podSA)
 				mountErr = fmt.Errorf("access denied to path %s", vaultPath)
 				return
