@@ -478,6 +478,18 @@ func (pm *PermissionManager) Watch(ctx context.Context, logger *slog.Logger) err
 	}
 }
 
+// jwtConfigured reports whether a JWT key source is configured.
+func (pm *PermissionManager) jwtConfigured() bool {
+	return pm.keyfunc != nil
+}
+
+// looksLikeJWT reports whether token has the shape of a compact JWS: exactly
+// three dot-separated segments. Opaque OAuth2 access tokens (e.g. Google's
+// "ya29." tokens) do not, so there is no point parsing them as JWTs.
+func looksLikeJWT(token string) bool {
+	return strings.Count(token, ".") == 2
+}
+
 func (pm *PermissionManager) ValidateJWT(tokenString string) (string, error) {
 	if pm.keyfunc == nil {
 		return "", errors.New("JWT validation is not configured")

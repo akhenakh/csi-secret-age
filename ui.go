@@ -48,23 +48,27 @@ func withAuth(handler http.Handler, permMgr *PermissionManager, logger *slog.Log
 		// Prefer a cryptographically verifiable JWT if one is provided.
 		if authHeader := r.Header.Get("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
 			token := strings.TrimPrefix(authHeader, "Bearer ")
-			username, err := permMgr.ValidateJWT(token)
-			if err == nil {
-				userPerms := permMgr.GetUserPermissions(username)
-				logger.Debug("JWT auth succeeded",
+			// Only try JWT validation when it can apply: opaque access tokens
+			// would always fail parsing and only add a misleading log line.
+			if permMgr.jwtConfigured() && looksLikeJWT(token) {
+				username, err := permMgr.ValidateJWT(token)
+				if err == nil {
+					userPerms := permMgr.GetUserPermissions(username)
+					logger.Debug("JWT auth succeeded",
+						"path", r.URL.Path,
+						"username", username,
+						"is_admin", userPerms.isAdmin,
+					)
+					ctx := context.WithValue(r.Context(), userPermsKey, userPerms)
+					handler.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+				logger.Debug("JWT validation failed",
 					"path", r.URL.Path,
-					"username", username,
-					"is_admin", userPerms.isAdmin,
+					"remote_addr", r.RemoteAddr,
+					"error", err,
 				)
-				ctx := context.WithValue(r.Context(), userPermsKey, userPerms)
-				handler.ServeHTTP(w, r.WithContext(ctx))
-				return
 			}
-			logger.Debug("JWT validation failed",
-				"path", r.URL.Path,
-				"remote_addr", r.RemoteAddr,
-				"error", err,
-			)
 
 			// The bearer may be an opaque OAuth2 access token (e.g. one forwarded
 			// by the gateway after an OIDC login) rather than a self-contained JWT.

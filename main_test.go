@@ -1781,3 +1781,61 @@ func TestUpdateHandler_RejectsNonCanonicalPath(t *testing.T) {
 	assert.Contains(t, tree.Nodes, "/app/x")
 	assert.Len(t, tree.Nodes, 1)
 }
+
+func TestLooksLikeJWT(t *testing.T) {
+	assert.True(t, looksLikeJWT("aaa.bbb.ccc"))
+	assert.False(t, looksLikeJWT("ya29.a0AfB_opaque-token"))
+	assert.False(t, looksLikeJWT("opaque"))
+	assert.False(t, looksLikeJWT("a.b.c.d"))
+}
+
+func TestWithAuth_OpaqueTokenSkipsJWT(t *testing.T) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubKeyBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubKeyBytes})
+
+	permPath := filepath.Join(t.TempDir(), "perm.yaml")
+	require.NoError(t, os.WriteFile(permPath, []byte("admin_users:\n  - jwt-user\n"), 0644))
+	pm, err := NewPermissionManager(permPath, string(pubKeyPEM), "sub")
+	require.NoError(t, err)
+
+	validJWT, err := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"sub": "jwt-user",
+		"exp": time.Now().Add(time.Hour).Unix(),
+	}).SignedString(privateKey)
+	require.NoError(t, err)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	tests := []struct {
+		name        string
+		token       string
+		wantCode    int
+		wantJWTLog  bool
+		wantInfoLog bool
+	}{
+		{"opaque access token", "ya29.opaque-token", http.StatusUnauthorized, false, true},
+		{"malformed JWT-shaped token", "aaa.bbb.ccc", http.StatusUnauthorized, true, true},
+		{"valid JWT", validJWT, http.StatusOK, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf strings.Builder
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			wrapped := withAuth(handler, pm, logger, "", "", "", false)
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Header.Set("Authorization", "Bearer "+tt.token)
+			rec := httptest.NewRecorder()
+			wrapped.ServeHTTP(rec, req)
+
+			assert.Equal(t, tt.wantCode, rec.Code)
+			assert.Equal(t, tt.wantJWTLog, strings.Contains(buf.String(), "JWT validation failed"), buf.String())
+			assert.Equal(t, tt.wantInfoLog, strings.Contains(buf.String(), "access token validation failed"), buf.String())
+		})
+	}
+}
