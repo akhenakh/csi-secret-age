@@ -1,6 +1,6 @@
 module github.com/akhenakh/csi-secret-age/awskms
 
-go 1.26.3
+go 1.26.8
 
 require (
 	github.com/aws/aws-sdk-go-v2/config v1.29.14

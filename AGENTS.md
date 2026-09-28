@@ -5,7 +5,7 @@ Single-binary Go CSI provider for Kubernetes. All code lives in one package (`ma
 
 ## Build & Run
 
-- **Go version:** `go 1.26.3` (mod file pins this).
+- **Go version:** `go 1.26.8` (mod file pins this).
 - **Build (with security experiment):**
   ```bash
   GOEXPERIMENT=runtimesecret go build -o csi-secret-age .
