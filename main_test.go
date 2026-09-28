@@ -1416,6 +1416,21 @@ func TestWithAuth_HeaderAdminOverride(t *testing.T) {
 	wrapped.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.False(t, seenAdmin)
+
+	// An empty admin value never grants admin, even when the header is absent.
+	wrapped = withAuth(handler, pm, getTestLogger(), "X-Forwarded-User", "X-Admin", "", false)
+	for _, adminHeader := range []string{"", "anything"} {
+		seenAdmin = true
+		req = httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Header.Set("X-Forwarded-User", "plain-user")
+		if adminHeader != "" {
+			req.Header.Set("X-Admin", adminHeader)
+		}
+		rec = httptest.NewRecorder()
+		wrapped.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.False(t, seenAdmin, "admin header %q", adminHeader)
+	}
 }
 
 func TestWithAuth_JWTTakesPrecedenceOverHeader(t *testing.T) {

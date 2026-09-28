@@ -113,6 +113,13 @@ func main() {
 		logger.Warn("DEV MODE without PERM_CONFIG_PATH: Web UI is unauthenticated and every pod can mount every secret")
 	}
 
+	// An empty JWT_ADMIN_VALUE would match requests that omit the admin header
+	// entirely, granting admin to every header-authenticated user.
+	if cfg.JWTAdminHeader != "" && cfg.JWTAdminValue == "" {
+		logger.Error("JWT_ADMIN_HEADER is set but JWT_ADMIN_VALUE is empty; refusing to start")
+		os.Exit(1)
+	}
+
 	var permMgr *PermissionManager
 	if cfg.PermConfigPath != "" {
 		var errPerm error

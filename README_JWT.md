@@ -287,7 +287,7 @@ When `JWT_USER_HEADER` is set:
 
 1. If the request has a valid `Authorization: Bearer <jwt>` token, it is used as usual (JWT takes precedence).
 2. Otherwise, the value of `JWT_USER_HEADER` is read as the authenticated username and looked up in the permissions file.
-3. If `JWT_ADMIN_HEADER` and `JWT_ADMIN_VALUE` are also set and the header matches, the user is treated as an admin regardless of the permissions file.
+3. If `JWT_ADMIN_HEADER` and `JWT_ADMIN_VALUE` are also set and the header matches, the user is treated as an admin regardless of the permissions file. `JWT_ADMIN_VALUE` must be non-empty when `JWT_ADMIN_HEADER` is set; otherwise the provider refuses to start.
 
 You do **not** need to configure `JWT_PUBLIC_KEY` or a JWKS if you only use header-based authentication. If you configure both, JWT is preferred and the header is a fallback.
 

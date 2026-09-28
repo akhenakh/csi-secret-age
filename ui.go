@@ -93,7 +93,9 @@ func withAuth(handler http.Handler, permMgr *PermissionManager, logger *slog.Log
 			username := strings.TrimSpace(r.Header.Get(userHeader))
 			if username != "" {
 				userPerms := permMgr.GetUserPermissions(username)
-				if adminHeader != "" && r.Header.Get(adminHeader) == adminValue {
+				// An empty adminValue must never match: a missing header also
+				// reads as "", which would make every user an admin.
+				if adminHeader != "" && adminValue != "" && r.Header.Get(adminHeader) == adminValue {
 					userPerms.isAdmin = true
 				}
 				logger.Debug("header auth succeeded",
