@@ -1,0 +1,190 @@
+{{- if and (not .Values.permConfig) (not .Values.devMode) }}
+{{- fail "permConfig is required: the provider refuses to start without a permissions file (set devMode=true for local development only)" }}
+{{- end }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "csi-secret-age.fullname" . }}
+  namespace: {{ include "csi-secret-age.namespace" . }}
+  labels:
+    {{- include "csi-secret-age.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "csi-secret-age.selectorLabels" . | nindent 6 }}
+  updateStrategy:
+    {{- toYaml .Values.daemonSet.updateStrategy | nindent 4 }}
+  template:
+    metadata:
+      annotations:
+        {{- range $key, $value := .Values.daemonSet.podAnnotations }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+      labels:
+        {{- include "csi-secret-age.selectorLabels" . | nindent 8 }}
+        {{- range $key, $value := .Values.daemonSet.podLabels }}
+        {{ $key }}: {{ $value | quote }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccountName }}
+      hostNetwork: true
+      {{- with .Values.daemonSet.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.daemonSet.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.daemonSet.priorityClassName }}
+      priorityClassName: {{ .Values.daemonSet.priorityClassName }}
+      {{- end }}
+      containers:
+        - name: csi-driver
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: VAULT_SECRET_NAME
+              value: {{ .Values.vaultSecretName | quote }}
+            - name: VAULT_NAMESPACE
+              value: {{ .Values.vaultNamespace | quote }}
+            - name: SOCKET_PATH
+              value: {{ .Values.socketPath | quote }}
+            - name: HTTP_PORT
+              value: {{ .Values.httpPort | quote }}
+            {{- if .Values.masterKey }}
+            - name: MASTER_KEY_FILE
+              value: /etc/csi-secret-age/secrets/master-key/key.txt
+            {{- end }}
+            {{- if .Values.awsKms }}
+            {{- if .Values.awsKms.ciphertext }}
+            - name: KMS_CIPHERTEXT_FILE
+              value: /etc/csi-secret-age/secrets/aws-kms/ciphertext
+            {{- end }}
+            {{- end }}
+            {{- if .Values.gcpKms }}
+            {{- if .Values.gcpKms.keyName }}
+            - name: GCP_KMS_KEY_NAME_FILE
+              value: /etc/csi-secret-age/secrets/gcp-kms/keyName
+            {{- end }}
+            {{- if .Values.gcpKms.ciphertext }}
+            - name: GCP_KMS_CIPHERTEXT_FILE
+              value: /etc/csi-secret-age/secrets/gcp-kms/ciphertext
+            {{- end }}
+            {{- end }}
+            {{- if .Values.jwtPublicKey }}
+            - name: JWT_PUBLIC_KEY_FILE
+              value: /etc/csi-secret-age/secrets/jwt/jwt-public-key.pem
+            {{- end }}
+            {{- if .Values.jwtJwksUrl }}
+            - name: JWT_JWKS_URL
+              value: {{ .Values.jwtJwksUrl | quote }}
+            {{- end }}
+            {{- if .Values.jwtIssuer }}
+            - name: JWT_ISSUER
+              value: {{ .Values.jwtIssuer | quote }}
+            - name: OAUTH_USERINFO_CACHE_TTL
+              value: {{ .Values.oauthUserInfoCacheTTL | quote }}
+            {{- end }}
+            {{- if .Values.jwtAudience }}
+            - name: JWT_AUDIENCE
+              value: {{ .Values.jwtAudience | quote }}
+            {{- end }}
+            {{- if or .Values.jwtPublicKey .Values.jwtJwksUrl .Values.jwtIssuer }}
+            - name: JWT_USER_CLAIM
+              value: {{ .Values.jwtUserClaim | quote }}
+            {{- end }}
+            {{- if .Values.permConfig }}
+            - name: PERM_CONFIG_PATH
+              value: /etc/csi-secret-age/perm.yaml
+            {{- end }}
+            {{- if .Values.devMode }}
+            - name: DEV_MODE
+              value: "true"
+            {{- end }}
+          ports:
+            - name: admin-http
+              containerPort: {{ .Values.httpPort }}
+              protocol: TCP
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: providers-socket-dir
+              mountPath: {{ dir .Values.socketPath }}
+            {{- if .Values.permConfig }}
+            - name: perms-config
+              mountPath: /etc/csi-secret-age
+              readOnly: true
+            {{- end }}
+            {{- if .Values.masterKey }}
+            - name: master-key-secret
+              mountPath: /etc/csi-secret-age/secrets/master-key
+              readOnly: true
+            {{- end }}
+            {{- if .Values.awsKms }}
+            {{- if .Values.awsKms.ciphertext }}
+            - name: aws-kms-secret
+              mountPath: /etc/csi-secret-age/secrets/aws-kms
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.gcpKms }}
+            {{- if or .Values.gcpKms.keyName .Values.gcpKms.ciphertext }}
+            - name: gcp-kms-secret
+              mountPath: /etc/csi-secret-age/secrets/gcp-kms
+              readOnly: true
+            {{- end }}
+            {{- end }}
+            {{- if .Values.jwtPublicKey }}
+            - name: jwt-public-key-secret
+              mountPath: /etc/csi-secret-age/secrets/jwt
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: providers-socket-dir
+          hostPath:
+            path: {{ .Values.csiProviderPath }}
+            type: DirectoryOrCreate
+        {{- if .Values.permConfig }}
+        - name: perms-config
+          configMap:
+            name: {{ .Values.permConfigMapName }}
+        {{- end }}
+        {{- if .Values.masterKey }}
+        - name: master-key-secret
+          secret:
+            secretName: {{ .Values.masterKeySecretName }}
+        {{- end }}
+        {{- if .Values.awsKms }}
+        {{- if .Values.awsKms.ciphertext }}
+        - name: aws-kms-secret
+          secret:
+            secretName: {{ .Values.awsKms.secretName | default "age-aws-kms-ciphertext" }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.gcpKms }}
+        {{- if or .Values.gcpKms.keyName .Values.gcpKms.ciphertext }}
+        - name: gcp-kms-secret
+          projected:
+            sources:
+              {{- if .Values.gcpKms.keyName }}
+              - secret:
+                  name: {{ .Values.gcpKms.keySecretName | default "age-gcp-kms-key" }}
+              {{- end }}
+              {{- if .Values.gcpKms.ciphertext }}
+              - secret:
+                  name: {{ .Values.gcpKms.ciphertextSecretName | default "age-gcp-kms-ciphertext" }}
+              {{- end }}
+        {{- end }}
+        {{- end }}
+        {{- if .Values.jwtPublicKey }}
+        - name: jwt-public-key-secret
+          secret:
+            secretName: {{ .Values.jwtPublicKeySecretName }}
+        {{- end }}

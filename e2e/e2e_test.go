@@ -408,6 +408,7 @@ func deployDriverViaHelm(t *testing.T) {
 		"--set", "awsKms.ciphertext=dGVzdC1hd3Mta21zLWNpcGhlcnRleHQ=",
 		"--set", "gcpKms.keyName=projects/test-project/locations/global/keyRings/test-keyring/cryptoKeys/test-key",
 		"--set", "gcpKms.ciphertext=dGVzdC1nY3Ata21zLWNpcGhlcnRleHQ=",
+		"--set-json", `permConfig={"admin_users":["e2e-admin"]}`,
 		"--wait",
 		"--timeout", "2m",
 	)
@@ -456,13 +457,24 @@ func verifyKMSEnvVars(t *testing.T) {
 		t.Logf("Env var %s = %s", envVar, actual)
 	}
 
-	// Also verify the pod is running (even if locked, it should start)
-	cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace, "-o", "jsonpath={.status.phase}")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("Failed to get pod phase: %v", err)
+	// Also verify the pod stays up (even if locked, it should start). A pod
+	// that exits at startup can briefly report Ready, so watch the restart
+	// count for a while instead of checking the phase once.
+	for i := 0; i < 5; i++ {
+		cmd := exec.Command("kubectl", "get", "pod", podName, "-n", namespace,
+			"-o", "jsonpath={.status.phase} {.status.containerStatuses[0].restartCount}")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Failed to get pod status: %v\nOutput: %s", err, string(out))
+		}
+		status := strings.TrimSpace(string(out))
+		if status != "Running 0" {
+			logs, _ := exec.Command("kubectl", "logs", "-n", namespace, podName, "--previous", "--tail=20").CombinedOutput()
+			t.Fatalf("DaemonSet pod %s is not stable (phase restarts = %q)\nPrevious logs:\n%s", podName, status, string(logs))
+		}
+		time.Sleep(2 * time.Second)
 	}
-	t.Logf("DaemonSet pod %s status: %s", podName, strings.TrimSpace(string(out)))
+	t.Logf("DaemonSet pod %s is running with no restarts", podName)
 }
 
 func runVolumeLifecycleTest(t *testing.T) {

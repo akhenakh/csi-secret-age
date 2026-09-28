@@ -1,0 +1,149 @@
+# Image configuration
+image:
+  repository: age-vault-csi
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Namespace override (defaults to release namespace)
+namespace: ""
+
+# Master key — if left empty, the vault starts locked and must be unlocked via the Web UI.
+# Provide an age secret key (AGE-SECRET-KEY-1...).
+masterKey: ""
+
+# AWS KMS configuration — use instead of masterKey to fetch the age identity from AWS KMS at startup.
+# Requires building the image with --build-arg KMS_ENABLED=true.
+# awsKms:
+#   ciphertext: ""  # base64-encoded ciphertext from: aws kms encrypt --key-id <arn> --plaintext fileb://key.txt --output text --query CiphertextBlob
+#   secretName: "age-aws-kms-ciphertext"  # name of the Secret holding the ciphertext
+
+# GCP KMS configuration — use instead of masterKey to fetch the age identity from GCP Cloud KMS at startup.
+# Requires building the image with --build-arg GCPKMS_ENABLED=true.
+# gcpKms:
+#   keyName: ""   # KMS key resource name, e.g. projects/{p}/locations/{l}/keyRings/{r}/cryptoKeys/{k}
+#   ciphertext: ""  # base64-encoded ciphertext from: gcloud kms encrypt --location global --keyring my-keyring --key my-key --plaintext-file key.txt --ciphertext-file - | base64 -w0
+#   keySecretName: "age-gcp-kms-key"
+#   ciphertextSecretName: "age-gcp-kms-ciphertext"
+
+# JWT public key for Web UI authentication (PEM-encoded RSA public key).
+# When set together with permConfig, the Web UI enforces JWT-based RBAC.
+# Leave empty to skip JWT verification (not recommended for production).
+jwtPublicKey: ""
+
+# JWT claim to use as the username (default: "sub"; use "email" with Google SSO)
+jwtUserClaim: "sub"
+
+# OIDC issuer URL. When set, the provider runs OIDC discovery and validates
+# opaque OAuth2 access tokens (e.g. forwarded by an Envoy Gateway OIDC
+# SecurityPolicy with forwardAccessToken) against the UserInfo endpoint.
+# Provider-agnostic, e.g. "https://accounts.google.com". See README_JWT.md.
+jwtIssuer: ""
+
+# Expected audience (OAuth client_id). Applies to self-contained JWTs only.
+# Required when jwtJwksUrl is set; the provider refuses to start without it.
+jwtAudience: ""
+
+# JWKS URL for validating self-contained Bearer JWTs (CLI clients).
+# Optional and complementary to jwtIssuer/UserInfo.
+jwtJwksUrl: ""
+
+# How long an identity resolved from the OIDC UserInfo endpoint is cached.
+oauthUserInfoCacheTTL: "5m"
+
+# Permission configuration (rendered as perm.yaml). REQUIRED unless devMode is
+# true: the provider refuses to start without it. It controls both Web UI
+# access and which namespaces/service accounts may mount which paths.
+permConfig:
+  # Example:
+  # admin_users:
+  #   - userH
+  # user_permissions:
+  #   userA:
+  #     - "/nats/*"
+  #     - "/postgresql/*"
+  #   userB:
+  #     - "/app/*"
+  # namespace_permissions:
+  #   prod:
+  #     - "/app/*"
+  #   prod/api-sa:
+  #     - "/app/api/*"
+
+# Vault backend Kubernetes Secret name
+vaultSecretName: "age-vault-backend"
+
+# Vault backend Kubernetes Secret namespace
+vaultNamespace: "kube-system"
+
+# gRPC CSI socket path (must match the Secrets Store CSI Driver provider path)
+socketPath: "/csi/csi-secret-age.sock"
+
+# HTTP admin UI port (served on hostNetwork)
+httpPort: 8090
+
+# Run in dev mode (disables JWT auth, uses fake K8s client). Do NOT enable in production.
+devMode: false
+
+# Host path for the CSI provider socket directory.
+# This must point to the Secrets Store CSI Driver's provider directory.
+csiProviderPath: "/var/lib/kubelet/plugins/secrets-store.csi.k8s.io/providers"
+
+# DaemonSet configuration
+daemonSet:
+  # Node selector for scheduling the DaemonSet pods
+  nodeSelector: {}
+  # Tolerations for the DaemonSet pods
+  tolerations:
+    - operator: Exists
+  # Priority class name
+  priorityClassName: ""
+  # Annotations for the DaemonSet pods
+  podAnnotations: {}
+  # Labels for the DaemonSet pods
+  podLabels: {}
+  # Update strategy (defaults to RollingUpdate)
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+
+# Resource requests and limits
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 64Mi
+
+# ServiceAccount name
+serviceAccountName: "age-vault-csi-sa"
+
+# ClusterRole name
+clusterRoleName: "age-vault-csi-role"
+
+# ClusterRoleBinding name
+clusterRoleBindingName: "age-vault-csi-binding"
+
+# Name for the master key Secret
+masterKeySecretName: "age-master-key"
+
+# Name for the JWT public key Secret
+jwtPublicKeySecretName: "jwt-public-key"
+
+# Name for the permissions ConfigMap
+permConfigMapName: "age-vault-perms"
+
+# Security context for the container.
+# The provider must run as root to create its socket in the host's
+# root-owned providers directory (csiProviderPath). All capabilities are
+# still dropped and the root filesystem is read-only.
+securityContext:
+  privileged: false
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  runAsNonRoot: false
+  runAsUser: 0
+  capabilities:
+    drop:
+      - ALL

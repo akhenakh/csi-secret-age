@@ -1,0 +1,17 @@
+apiVersion: v2
+name: csi-secret-age
+description: Age-encrypted vault CSI provider for Kubernetes — secure, zero-infrastructure secrets storage
+type: application
+version: 0.1.0
+appVersion: "latest"
+keywords:
+  - csi
+  - secrets
+  - age
+  - encryption
+  - vault
+home: https://github.com/akhenakh/csi-secret-age
+sources:
+  - https://github.com/akhenakh/csi-secret-age
+maintainers:
+  - name: akhenakh

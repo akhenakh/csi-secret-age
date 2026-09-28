@@ -1,0 +1,12 @@
+{{- if .Values.permConfig }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.permConfigMapName }}
+  namespace: {{ include "csi-secret-age.namespace" . }}
+  labels:
+    {{- include "csi-secret-age.labels" . | nindent 4 }}
+data:
+  perm.yaml: |
+    {{- .Values.permConfig | toYaml | nindent 4 }}
+{{- end }}

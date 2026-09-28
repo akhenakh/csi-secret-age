@@ -1,0 +1,43 @@
+{{ include "csi-secret-age.name" . }} has been installed.
+
+The DaemonSet runs with hostNetwork: true and mounts the CSI socket directory at:
+  {{ .Values.csiProviderPath }}
+
+{{- if not .Values.masterKey }}
+{{- if not .Values.awsKms }}
+{{- if not .Values.gcpKms }}
+⚠  No master key or KMS configuration provided. The vault will start in **LOCKED** state.
+   Port-forward to the admin UI and unlock it:
+     kubectl port-forward -n {{ include "csi-secret-age.namespace" . }} ds/{{ include "csi-secret-age.fullname" . }} {{ .Values.httpPort }}:{{ .Values.httpPort }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.masterKey }}
+✓  Master key configured. The vault will unlock automatically on startup.
+{{- end }}
+{{- if .Values.awsKms }}
+{{- if .Values.awsKms.ciphertext }}
+✓  AWS KMS configured. The vault will unlock automatically on startup (requires image built with KMS_ENABLED=true).
+{{- end }}
+{{- end }}
+{{- if .Values.gcpKms }}
+{{- if or .Values.gcpKms.keyName .Values.gcpKms.ciphertext }}
+✓  GCP KMS configured. The vault will unlock automatically on startup (requires image built with GCPKMS_ENABLED=true).
+{{- end }}
+{{- end }}
+   Access the admin UI:
+     kubectl port-forward -n {{ include "csi-secret-age.namespace" . }} ds/{{ include "csi-secret-age.fullname" . }} {{ .Values.httpPort }}:{{ .Values.httpPort }}
+
+{{- if not .Values.permConfig }}
+⚠  permConfig is not set (devMode only): the Web UI is unauthenticated and
+   every pod can mount every secret.
+{{- else if or .Values.jwtPublicKey .Values.jwtJwksUrl .Values.jwtIssuer }}
+✓  JWT authentication enabled for the Web UI.
+{{- else }}
+⚠  No JWT source is configured: every Web UI request is rejected unless a
+   trusted proxy header is used. Set jwtPublicKey, jwtJwksUrl or jwtIssuer.
+{{- end }}
+
+{{- if .Values.devMode }}
+⚠  DEV_MODE is enabled. Do NOT use in production.
+{{- end }}
