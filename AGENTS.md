@@ -22,6 +22,7 @@ Single-binary Go CSI provider for Kubernetes. All code lives in one package (`ma
 - **Single-package design:** Everything is in `package main`. There are no sub-packages or internal packages.
 - **Entry point:** `main.go` wires a `VaultManager` (crypto + K8s storage), a gRPC CSI server, and an HTTP admin UI.
 - **Runtime/secret experiment:** Any code handling plaintext must run inside `secret.Do(func(){ ... })`. The Go GC then zeroes the memory pages afterward. This is not optional for the security claims—if you add secret-handling code, wrap it in `secret.Do`.
+- **Startup must tolerate a cold network:** `NewVaultManager` makes one best-effort unlock attempt, then `VaultManager.AutoUnlock` (run by `main`'s errgroup) retries with jittered backoff until it succeeds; a refused `Mount` kicks the loop. Never turn unlock back into a one-shot call: nodes routinely boot before the Kubernetes API and the cloud KMS are reachable, and a locked provider refuses every mount. OIDC discovery follows the same pattern (`PermissionManager.WatchOIDCDiscovery`).
 - **No generated code:** No protobuf generation, no `go generate`, no code generation step.
 - **No linter/typecheck configs:** No `.golangci.yml`, `Makefile`, or CI workflows. Standard `go vet` and `go test` are the only verification steps.
 

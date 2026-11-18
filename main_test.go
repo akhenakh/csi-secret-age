@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	stdlibruntime "runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1838,4 +1840,284 @@ func TestWithAuth_OpaqueTokenSkipsJWT(t *testing.T) {
 			assert.Equal(t, tt.wantInfoLog, strings.Contains(buf.String(), "access token validation failed"), buf.String())
 		})
 	}
+}
+
+// fakeKeyProvider is a MasterKeyProvider whose answer can change between calls.
+// It counts calls so tests can assert how often the auto-unlock loop retried.
+type fakeKeyProvider struct {
+	mu    sync.Mutex
+	calls int
+	key   string
+	err   error
+}
+
+func (p *fakeKeyProvider) GetMasterKey(context.Context) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls++
+	return p.key, p.err
+}
+
+func (p *fakeKeyProvider) Calls() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+func (p *fakeKeyProvider) SetResult(key string, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.key, p.err = key, err
+}
+
+// fastAutoUnlockRetries compresses the auto-unlock retry schedule for the
+// duration of the test.
+func fastAutoUnlockRetries(t *testing.T) {
+	t.Helper()
+	prevTimeout := autoUnlockAttemptTimeout
+	prevInitial := autoUnlockInitialBackoff
+	prevMax := autoUnlockMaxBackoff
+	prevRejected := autoUnlockRejectedBackoff
+	autoUnlockAttemptTimeout = 2 * time.Second
+	autoUnlockInitialBackoff = 5 * time.Millisecond
+	autoUnlockMaxBackoff = 20 * time.Millisecond
+	autoUnlockRejectedBackoff = 20 * time.Millisecond
+	t.Cleanup(func() {
+		autoUnlockAttemptTimeout = prevTimeout
+		autoUnlockInitialBackoff = prevInitial
+		autoUnlockMaxBackoff = prevMax
+		autoUnlockRejectedBackoff = prevRejected
+	})
+}
+
+// seedVault stores a vault encrypted with key, so later unlocks have to prove
+// they hold the matching identity.
+func seedVault(t *testing.T, client *fake.Clientset, cfg Config, key string) {
+	t.Helper()
+	seed := NewVaultManager(cfg, client, &EnvKeyProvider{Key: key})
+	require.False(t, seed.IsLocked())
+	require.NoError(t, seed.EncryptAndSave(t.Context(), &VaultTree{Nodes: map[string]*VaultNode{
+		"/db/pw": {Value: "s3cr3t"},
+	}}))
+}
+
+func TestAutoUnlock_RetriesUntilKubernetesAPIRecovers(t *testing.T) {
+	fastAutoUnlockRetries(t)
+
+	key := generateTestMasterKey(t)
+	cfg := Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system"}
+	client := fake.NewSimpleClientset()
+	seedVault(t, client, cfg, key)
+
+	// The API becomes reachable only after a few refusals, like a node that
+	// booted before its networking was up.
+	var getCalls atomic.Int32
+	client.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if getCalls.Add(1) <= 2 {
+			return true, nil, errors.New("dial tcp 10.0.0.1:443: connect: network is unreachable")
+		}
+		return false, nil, nil
+	})
+
+	mgr := NewVaultManager(cfg, client, &EnvKeyProvider{Key: key})
+	require.True(t, mgr.IsLocked(), "the startup attempt must fail while the API is unreachable")
+
+	require.NoError(t, mgr.AutoUnlock(t.Context(), getTestLogger()))
+	require.False(t, mgr.IsLocked(), "auto-unlock must recover once the API is reachable")
+	require.GreaterOrEqual(t, getCalls.Load(), int32(3))
+}
+
+func TestAutoUnlock_NoKeyConfiguredDoesNotSpin(t *testing.T) {
+	fastAutoUnlockRetries(t)
+
+	provider := &fakeKeyProvider{err: ErrNoMasterKeyConfigured}
+	mgr := NewVaultManager(Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system"}, fake.NewSimpleClientset(), provider)
+	require.True(t, mgr.IsLocked())
+
+	require.NoError(t, mgr.AutoUnlock(t.Context(), getTestLogger()))
+	assert.Equal(t, 2, provider.Calls(), "one startup attempt and one loop attempt, then stop")
+	require.True(t, mgr.IsLocked())
+}
+
+func TestAutoUnlock_KeyMismatchRetriesSlowly(t *testing.T) {
+	fastAutoUnlockRetries(t)
+	// A rotated key cannot fix itself: retries must not hammer the KMS.
+	autoUnlockRejectedBackoff = 30 * time.Second
+
+	cfg := Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system"}
+	client := fake.NewSimpleClientset()
+	seedVault(t, client, cfg, generateTestMasterKey(t))
+
+	provider := &fakeKeyProvider{key: generateTestMasterKey(t)}
+	mgr := NewVaultManager(cfg, client, provider)
+	require.True(t, mgr.IsLocked())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- mgr.AutoUnlock(ctx, getTestLogger()) }()
+
+	require.Eventually(t, func() bool { return provider.Calls() >= 2 }, time.Second, 5*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+
+	assert.Equal(t, 2, provider.Calls(), "a rejected key must be retried slowly, not at network-failure pace")
+	require.True(t, mgr.IsLocked())
+
+	cancel()
+	require.NoError(t, <-done)
+}
+
+func TestAutoUnlock_StopsOnContextCancel(t *testing.T) {
+	provider := &fakeKeyProvider{err: errors.New("kms unreachable")}
+	mgr := NewVaultManager(Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system"}, fake.NewSimpleClientset(), provider)
+	require.True(t, mgr.IsLocked())
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- mgr.AutoUnlock(ctx, getTestLogger()) }()
+
+	require.Eventually(t, func() bool { return provider.Calls() >= 2 }, time.Second, 5*time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("auto-unlock loop did not stop on context cancellation")
+	}
+}
+
+func TestMount_RefusalKicksAutoUnlock(t *testing.T) {
+	fastAutoUnlockRetries(t)
+	// A very long backoff means only a kick from the refused mount can explain
+	// a retry landing before the test times out.
+	autoUnlockInitialBackoff = time.Hour
+	autoUnlockMaxBackoff = time.Hour
+
+	key := generateTestMasterKey(t)
+	cfg := Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system"}
+	client := fake.NewSimpleClientset()
+	seedVault(t, client, cfg, key)
+
+	provider := &fakeKeyProvider{err: errors.New("kms unreachable"), key: key}
+	mgr := NewVaultManager(cfg, client, provider)
+	require.True(t, mgr.IsLocked())
+
+	done := make(chan error, 1)
+	go func() { done <- mgr.AutoUnlock(t.Context(), getTestLogger()) }()
+
+	// Wait until the loop has failed once and parked in its long backoff.
+	require.Eventually(t, func() bool { return provider.Calls() >= 2 }, time.Second, 5*time.Millisecond)
+	provider.SetResult(key, nil)
+
+	server := &ProviderServer{manager: mgr, logger: getTestLogger(), allowUnauthenticated: true}
+	_, err := server.Mount(t.Context(), &v1alpha1.MountRequest{})
+	require.ErrorIs(t, err, ErrVaultLocked)
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("a refused mount did not wake the auto-unlock loop")
+	}
+	require.False(t, mgr.IsLocked())
+}
+
+func TestUnlock_ClassifiesKeyErrors(t *testing.T) {
+	ctx := t.Context()
+	cfg := Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system"}
+	client := fake.NewSimpleClientset()
+	goodKey := generateTestMasterKey(t)
+	seedVault(t, client, cfg, goodKey)
+
+	mgr := NewVaultManager(cfg, client, nil)
+	require.True(t, mgr.IsLocked())
+
+	// Malformed key.
+	err := mgr.Unlock(ctx, "not-an-age-key")
+	require.Error(t, err)
+	assert.True(t, isVaultKeyError(err))
+	assert.Contains(t, err.Error(), "invalid master key")
+
+	// Well-formed key that is not a recipient of the stored vault.
+	err = mgr.Unlock(ctx, generateTestMasterKey(t))
+	require.Error(t, err)
+	assert.True(t, isVaultKeyError(err))
+
+	// An unreachable API is transient, not a verdict on the key.
+	client.PrependReactor("get", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("dial tcp: connect: connection refused")
+	})
+	err = mgr.Unlock(ctx, goodKey)
+	require.Error(t, err)
+	assert.False(t, isVaultKeyError(err))
+	assert.Contains(t, err.Error(), "kubernetes api unavailable")
+}
+
+func TestWatchOIDCDiscovery_RetriesUntilIssuerReachable(t *testing.T) {
+	prevTimeout := oidcDiscoveryAttemptTimeout
+	prevInitial := oidcDiscoveryInitialBackoff
+	prevMax := oidcDiscoveryMaxBackoff
+	oidcDiscoveryAttemptTimeout = 2 * time.Second
+	oidcDiscoveryInitialBackoff = 5 * time.Millisecond
+	oidcDiscoveryMaxBackoff = 20 * time.Millisecond
+	t.Cleanup(func() {
+		oidcDiscoveryAttemptTimeout = prevTimeout
+		oidcDiscoveryInitialBackoff = prevInitial
+		oidcDiscoveryMaxBackoff = prevMax
+	})
+
+	var requests atomic.Int32
+	var serverURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Like a node that rebooted before its networking is up.
+		if requests.Add(1) <= 2 {
+			http.Error(w, "issuer is not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"issuer":%q,"authorization_endpoint":%q,"token_endpoint":%q,"jwks_uri":%q,"userinfo_endpoint":%q}`,
+			serverURL, serverURL+"/auth", serverURL+"/token", serverURL+"/keys", serverURL+"/userinfo")
+	}))
+	defer srv.Close()
+	serverURL = srv.URL
+
+	pm := &PermissionManager{issuer: srv.URL, userClaim: "email"}
+
+	// EnableUserInfoAuth is called from the retry loop while HTTP handlers may
+	// already be validating tokens; the race detector guards that contract.
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = pm.ValidateAccessToken(context.Background(), "opaque-token")
+			}
+		}
+	}()
+
+	require.NoError(t, pm.WatchOIDCDiscovery(t.Context(), getTestLogger(), time.Minute))
+	close(stop)
+	wg.Wait()
+
+	pm.oidcMu.RLock()
+	provider := pm.oidcProvider
+	pm.oidcMu.RUnlock()
+	require.NotNil(t, provider, "discovery must eventually enable UserInfo validation")
+	require.GreaterOrEqual(t, requests.Load(), int32(3))
+}
+
+func TestAutoUnlock_AlreadyUnlockedMakesNoExtraKeyFetch(t *testing.T) {
+	provider := &fakeKeyProvider{key: generateTestMasterKey(t)}
+	mgr := NewVaultManager(Config{VaultSecretName: "test-vault", VaultNamespace: "kube-system"}, fake.NewSimpleClientset(), provider)
+	require.False(t, mgr.IsLocked())
+	require.Equal(t, 1, provider.Calls())
+
+	require.NoError(t, mgr.AutoUnlock(t.Context(), getTestLogger()))
+	assert.Equal(t, 1, provider.Calls(), "an unlocked vault must not trigger another KMS decrypt")
 }

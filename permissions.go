@@ -37,7 +37,9 @@ type PermissionManager struct {
 
 	// oidcProvider, when set, enables validation of opaque OAuth2 access tokens
 	// via the provider's UserInfo endpoint. userInfoCache memoises the resolved
-	// identities. Both are nil unless EnableUserInfoAuth has been called.
+	// identities. Both are nil until EnableUserInfoAuth has been called, which
+	// OIDC discovery does asynchronously once the issuer is reachable.
+	oidcMu        sync.RWMutex
 	oidcProvider  *oidc.Provider
 	userInfoCache *userInfoCache
 
@@ -586,11 +588,62 @@ func NewOIDCProvider(ctx context.Context, issuer string) (*oidc.Provider, error)
 }
 
 // EnableUserInfoAuth turns on validation of opaque OAuth2 access tokens via the
-// OIDC UserInfo endpoint. Resolved identities are cached for ttl. Call once at
-// startup after OIDC discovery has succeeded.
+// OIDC UserInfo endpoint. Resolved identities are cached for ttl. It is safe to
+// call after startup: discovery may only complete once the issuer is reachable.
 func (pm *PermissionManager) EnableUserInfoAuth(provider *oidc.Provider, ttl time.Duration) {
+	pm.oidcMu.Lock()
+	defer pm.oidcMu.Unlock()
 	pm.oidcProvider = provider
 	pm.userInfoCache = newUserInfoCache(ttl)
+}
+
+// OIDC discovery retry tuning; variables so tests can compress the schedule.
+var (
+	oidcDiscoveryAttemptTimeout = 15 * time.Second
+	oidcDiscoveryInitialBackoff = 5 * time.Second
+	oidcDiscoveryMaxBackoff     = 5 * time.Minute
+)
+
+// WatchOIDCDiscovery performs OIDC discovery against the configured issuer,
+// retrying with backoff until it succeeds or ctx is cancelled, then enables
+// UserInfo access-token validation. Returns nil when no issuer is configured.
+//
+// A single attempt at startup is not enough: a node that reboots before its
+// network is up fails discovery once, and without a retry opaque access-token
+// validation would stay disabled until the pod was restarted.
+func (pm *PermissionManager) WatchOIDCDiscovery(ctx context.Context, logger *slog.Logger, ttl time.Duration) error {
+	if pm.issuer == "" {
+		return nil
+	}
+
+	backoff := oidcDiscoveryInitialBackoff
+	for attempt := 1; ; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, oidcDiscoveryAttemptTimeout)
+		provider, err := NewOIDCProvider(attemptCtx, pm.issuer)
+		cancel()
+
+		if err == nil {
+			pm.EnableUserInfoAuth(provider, ttl)
+			logger.Info("OIDC UserInfo access-token validation enabled",
+				"issuer", pm.issuer, "attempts", attempt, "cache_ttl", ttl)
+			return nil
+		}
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		logger.Warn("OIDC discovery failed; retrying",
+			"issuer", pm.issuer, "attempt", attempt, "error", err, "retry_in", backoff)
+
+		timer := time.NewTimer(jitter(backoff))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+		backoff = min(backoff*2, oidcDiscoveryMaxBackoff)
+	}
 }
 
 // ValidateAccessToken resolves the identity behind an opaque OAuth2 access
@@ -604,16 +657,20 @@ func (pm *PermissionManager) EnableUserInfoAuth(provider *oidc.Provider, ttl tim
 // per-identity through the permissions file. Self-contained JWTs (validated by
 // ValidateJWT) remain the audience-bound path.
 func (pm *PermissionManager) ValidateAccessToken(ctx context.Context, token string) (string, error) {
-	if pm.oidcProvider == nil {
+	pm.oidcMu.RLock()
+	provider, cache := pm.oidcProvider, pm.userInfoCache
+	pm.oidcMu.RUnlock()
+
+	if provider == nil {
 		return "", errors.New("access token validation is not configured")
 	}
 
 	cacheKey := tokenCacheKey(token)
-	if username, ok := pm.userInfoCache.get(cacheKey); ok {
+	if username, ok := cache.get(cacheKey); ok {
 		return username, nil
 	}
 
-	userInfo, err := pm.oidcProvider.UserInfo(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
+	userInfo, err := provider.UserInfo(ctx, oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token}))
 	if err != nil {
 		return "", fmt.Errorf("userinfo lookup failed: %w", err)
 	}
@@ -644,7 +701,7 @@ func (pm *PermissionManager) ValidateAccessToken(ctx context.Context, token stri
 		}
 	}
 
-	pm.userInfoCache.put(cacheKey, username)
+	cache.put(cacheKey, username)
 	return username, nil
 }
 

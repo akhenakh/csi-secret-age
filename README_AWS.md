@@ -7,7 +7,7 @@ The provider can fetch its age master key from AWS KMS instead of storing it as 
 1. You generate an age identity (master key)
 2. You encrypt it with AWS KMS (`kms:Encrypt`)
 3. The base64 ciphertext blob is stored in a Kubernetes Secret
-4. At startup, the provider calls `kms:Decrypt` to recover the age identity
+4. At startup, the provider calls `kms:Decrypt` to recover the age identity, and keeps retrying with backoff if the KMS or the Kubernetes API is not reachable yet
 5. The age identity is used to unlock the vault (same as `MASTER_KEY`)
 
 The AWS KMS client uses the standard AWS credential chain (env vars, instance profile, `~/.aws/credentials`, etc.). The IAM role attached to the DaemonSet pods must have `kms:Decrypt` permission on the target KMS key.

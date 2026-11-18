@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"filippo.io/age"
 	"github.com/caarlos0/env/v11"
@@ -137,24 +136,6 @@ func main() {
 		}
 		logger.Info("Permissions loaded", "path", cfg.PermConfigPath, "user_claim", cfg.JWTUserClaim)
 
-		// When an issuer is configured, run OIDC discovery so opaque OAuth2 access
-		// tokens (e.g. forwarded by the gateway after an OIDC login) can be
-		// validated against the provider's UserInfo endpoint. Discovery failure is
-		// non-fatal: the JWT and header auth paths still work without it.
-		if cfg.JWTIssuer != "" {
-			discoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			provider, errOIDC := NewOIDCProvider(discoveryCtx, cfg.JWTIssuer)
-			cancel()
-			if errOIDC != nil {
-				logger.Warn("OIDC discovery failed; opaque access-token (UserInfo) validation disabled",
-					"issuer", cfg.JWTIssuer, "error", errOIDC)
-			} else {
-				permMgr.EnableUserInfoAuth(provider, cfg.OAuthUserInfoCacheTTL)
-				logger.Info("OIDC UserInfo access-token validation enabled",
-					"issuer", cfg.JWTIssuer, "cache_ttl", cfg.OAuthUserInfoCacheTTL)
-			}
-		}
-
 		if cfg.JWTUserHeader != "" {
 			logger.Warn("Header-based authentication enabled: trusting upstream proxy to set header",
 				"user_header", cfg.JWTUserHeader,
@@ -165,9 +146,9 @@ func main() {
 	}
 
 	if manager.IsLocked() {
-		logger.Warn("Starting in LOCKED mode. Access the Web UI to unlock the vault.")
+		logger.Warn("Starting in LOCKED mode: secret mounts are refused until the vault is unlocked (retrying via the key provider, or through the Web UI)")
 	} else {
-		logger.Info("Started successfully in UNLOCKED mode via environment Master Key.")
+		logger.Info("Started successfully in UNLOCKED mode via the configured master key provider.")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -175,14 +156,32 @@ func main() {
 
 	g, ctx := errgroup.WithContext(ctx)
 
-	// 0. Permissions file watcher
+	// 0. Vault auto-unlock retries. Right after a node reboots the Kubernetes
+	// API and the cloud KMS can be unreachable for tens of seconds; a single
+	// startup attempt would leave the node locked and refusing every mount
+	// until an operator intervenes.
+	g.Go(func() error {
+		return manager.AutoUnlock(ctx, logger)
+	})
+
+	// 0b. OIDC discovery for opaque access-token validation. Same boot race:
+	// retry until the issuer is reachable instead of silently disabling the
+	// UserInfo path until the pod is restarted. Failure is non-fatal: the JWT
+	// and header auth paths still work without it.
+	if permMgr != nil && cfg.JWTIssuer != "" {
+		g.Go(func() error {
+			return permMgr.WatchOIDCDiscovery(ctx, logger, cfg.OAuthUserInfoCacheTTL)
+		})
+	}
+
+	// 1. Permissions file watcher
 	if permMgr != nil {
 		g.Go(func() error {
 			return permMgr.Watch(ctx, logger)
 		})
 	}
 
-	// 1. gRPC CSI Server
+	// 2. gRPC CSI Server
 	g.Go(func() error {
 		if err := os.Remove(cfg.SocketPath); err != nil && !os.IsNotExist(err) {
 			return err
@@ -204,7 +203,7 @@ func main() {
 		return grpcServer.Serve(lis)
 	})
 
-	// 2. HTTP Admin Server
+	// 3. HTTP Admin Server
 	g.Go(func() error {
 		return startHTTPServer(ctx, logger, cfg, manager, permMgr)
 	})

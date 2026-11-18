@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -111,7 +110,7 @@ type EnvKeyProvider struct {
 
 func (e *EnvKeyProvider) GetMasterKey(ctx context.Context) (string, error) {
 	if e.Key == "" {
-		return "", errors.New("master key not found in environment")
+		return "", ErrNoMasterKeyConfigured
 	}
 	return e.Key, nil
 }

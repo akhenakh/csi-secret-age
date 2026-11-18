@@ -7,7 +7,7 @@ The provider can fetch its age master key from GCP Cloud KMS instead of storing 
 1. You generate an age identity (master key)
 2. You encrypt it with GCP Cloud KMS (`gcloud kms encrypt`)
 3. The base64 ciphertext blob is stored in a Kubernetes Secret
-4. At startup, the provider calls `kms:Decrypt` to recover the age identity
+4. At startup, the provider calls `kms:Decrypt` to recover the age identity, and keeps retrying with backoff if the KMS or the Kubernetes API is not reachable yet
 5. The age identity is used to unlock the vault (same as `MASTER_KEY`)
 
 The GCP KMS client uses Application Default Credentials (ADC). The IAM service account attached to the DaemonSet pods must have `roles/cloudkms.cryptoKeyDecrypter` on the target key.

@@ -8,7 +8,7 @@ No external databases or heavy Vault installations are required.
 
 ## Features
 * **Zero Infrastructure:** State is saved as an encrypted blob inside a standard Kubernetes Secret. Backing up your cluster naturally backs up your secrets.
-* **Cold Start / Lock Mode:** The provider starts in a "Locked" state. It can be unlocked manually via the Web UI, via an environment variable, or seamlessly via Cloud KMS integrations.
+* **Cold Start / Lock Mode:** The provider starts in a "Locked" state. It can be unlocked manually via the Web UI, via an environment variable, or seamlessly via Cloud KMS integrations. When a key provider is configured, the automatic unlock is retried with backoff, so a node that reboots before its network is up unlocks itself instead of staying locked.
 * **Two-Layer Access Control:** Per-namespace path-pattern policies restrict which namespaces or specific workloads can access which subtrees. Web UI JWT permissions restrict which users can manage which parts of the tree.
 * **Web UI JWT Permissions:** In production (non-dev mode), the Web UI can enforce JWT-based RBAC so users only see and manage the parts of the tree they own.
 * **Modern Cryptography:** Powered by the modern, secure `filippo.io/age` encryption standard.
@@ -70,6 +70,8 @@ kubectl port-forward -n kube-system ds/csi-secret-age 8090:8090
 3. Paste your `AGE-SECRET-KEY-...` into the form and click **Unlock**.
 
 *(Note: You can also choose to mount the master key as an environment variable `MASTER_KEY`, read it from a file via `MASTER_KEY_FILE`, or implement the `MasterKeyProvider` interface to fetch it from a Cloud KMS automatically on boot).*
+
+When a key provider is configured, the automatic unlock is retried in the background with jittered exponential backoff (2s up to 60s) until it succeeds, and every refused mount request wakes the retry loop immediately. A node that reboots before the Kubernetes API or the KMS endpoint is reachable therefore unlocks itself a few seconds later instead of staying locked. A key that does not match the stored vault is only retried every 5 minutes, since retrying cannot fix it: correct the key material and the provider recovers on its own.
 
 ### 4. (Optional) Unlock via Cloud KMS
 

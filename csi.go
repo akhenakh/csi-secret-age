@@ -33,6 +33,9 @@ func (s *ProviderServer) canAccess(namespace, sa, vaultPath string) bool {
 
 func (s *ProviderServer) Mount(ctx context.Context, req *v1alpha1.MountRequest) (*v1alpha1.MountResponse, error) {
 	if s.manager.IsLocked() {
+		// Wake the auto-unlock loop: the kubelet retries refused mounts, which
+		// is exactly when the node's networking is likely to be up again.
+		s.manager.KickUnlock()
 		s.logger.Warn("Mount requested but Vault is locked")
 		return nil, ErrVaultLocked
 	}

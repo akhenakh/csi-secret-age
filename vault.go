@@ -49,39 +49,61 @@ var ErrVaultLocked = errors.New("Vault is currently locked. Master key is requir
 // Replacing the key of a running vault would break every mount and write.
 var ErrVaultAlreadyUnlocked = errors.New("vault is already unlocked")
 
+// ErrNoMasterKeyConfigured is returned by a MasterKeyProvider that has no key to
+// supply at all (e.g. an empty MASTER_KEY with no cloud KMS configured). The
+// auto-unlock loop treats it as terminal: the vault stays locked until an
+// operator unlocks it through the Web UI. Retrying cannot help.
+var ErrNoMasterKeyConfigured = errors.New("no master key configured")
+
+// vaultKeyError marks an unlock failure caused by the key material itself
+// (malformed, not an X25519 identity, or not a recipient of the stored vault)
+// rather than by a transient condition such as an unreachable Kubernetes API or
+// KMS endpoint. Auto-unlock retries the former slowly and the latter fast.
+type vaultKeyError struct{ err error }
+
+func (e *vaultKeyError) Error() string { return e.err.Error() }
+func (e *vaultKeyError) Unwrap() error { return e.err }
+
+func isVaultKeyError(err error) bool {
+	var keyErr *vaultKeyError
+	return errors.As(err, &keyErr)
+}
+
 type VaultManager struct {
-	k8sClient kubernetes.Interface
-	config    Config
+	k8sClient   kubernetes.Interface
+	config      Config
+	keyProvider MasterKeyProvider
 
 	mu       sync.RWMutex
 	identity *age.X25519Identity
 	isLocked bool
+
+	// unlockKick wakes the auto-unlock loop when a mount is refused, so a node
+	// whose network just came back recovers immediately instead of waiting out
+	// the current backoff.
+	unlockKick chan struct{}
 }
 
 func NewVaultManager(cfg Config, client kubernetes.Interface, keyProvider MasterKeyProvider) *VaultManager {
 	vm := &VaultManager{
-		k8sClient: client,
-		config:    cfg,
-		isLocked:  true, // Start locked by default
+		k8sClient:   client,
+		config:      cfg,
+		keyProvider: keyProvider,
+		isLocked:    true, // Start locked by default
+		unlockKick:  make(chan struct{}, 1),
 	}
 
-	// Try to auto-unlock if the key provider has the key (e.g. env var or Cloud KMS)
+	// Best-effort first attempt so a healthy boot is unlocked before the CSI
+	// socket is registered. It is not the last word: a node that reboots before
+	// its network is up fails here, and AutoUnlock keeps retrying in the
+	// background.
 	if keyProvider != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		key, err := keyProvider.GetMasterKey(ctx)
-		switch {
-		case err != nil:
-			slog.Error("Failed to fetch master key from KeyProvider; vault remains locked", "error", err)
-		case key == "":
-			slog.Warn("KeyProvider returned an empty master key; vault remains locked")
-		default:
-			if unlockErr := vm.Unlock(ctx, key); unlockErr != nil {
-				slog.Error("Auto-unlock failed", "error", unlockErr)
-			} else {
-				slog.Info("Vault auto-unlocked successfully via KeyProvider")
+		if err := vm.tryAutoUnlock(context.Background()); err != nil {
+			if !errors.Is(err, ErrNoMasterKeyConfigured) {
+				slog.Error("Auto-unlock at startup failed; retrying in the background", "error", err)
 			}
+		} else {
+			slog.Info("Vault auto-unlocked successfully via KeyProvider")
 		}
 	}
 
@@ -126,7 +148,7 @@ func (m *VaultManager) Unlock(ctx context.Context, masterKey string) error {
 	})
 
 	if parseErr != nil {
-		return fmt.Errorf("invalid master key: %w", parseErr)
+		return &vaultKeyError{fmt.Errorf("invalid master key: %w", parseErr)}
 	}
 
 	if err := m.verifyIdentity(ctx, identity); err != nil {
@@ -152,7 +174,9 @@ func (m *VaultManager) verifyIdentity(ctx context.Context, identity *age.X25519I
 		if k8serrors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("failed to load vault to verify master key: %w", err)
+		// The key itself is not in question here: we could not reach the API to
+		// compare it against the stored vault. Auto-unlock retries this fast.
+		return fmt.Errorf("kubernetes api unavailable while verifying master key: %w", err)
 	}
 	ciphertext, ok := sec.Data["vault.enc"]
 	if !ok || len(ciphertext) == 0 {
@@ -164,7 +188,7 @@ func (m *VaultManager) verifyIdentity(ctx context.Context, identity *age.X25519I
 		// age.Decrypt unwraps the file key from the header, which fails
 		// unless identity is one of the vault's recipients.
 		if _, err := age.Decrypt(bytes.NewReader(ciphertext), identity); err != nil {
-			verifyErr = fmt.Errorf("invalid master key: cannot decrypt existing vault: %w", err)
+			verifyErr = &vaultKeyError{fmt.Errorf("invalid master key: cannot decrypt existing vault: %w", err)}
 		}
 	})
 	return verifyErr
